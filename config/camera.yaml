@@ -1,0 +1,12 @@
+cameras:
+  - id: CAM-001
+    name: Plant Entrance
+    rtsp_url: ${RTSP_URL}
+    enabled: true
+    target_fps: ${TARGET_FPS:-10}
+    reconnect_delay: 5
+    connection_timeout: 10
+    read_timeout: 10
+    frame_skip: 0
+    confidence_threshold: ${CONFIDENCE_THRESHOLD:-0.35}
+    zone: general

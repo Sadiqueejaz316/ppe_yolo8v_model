@@ -1,0 +1,52 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Evidence and runtime output
+evidence/**
+!evidence/.gitkeep
+evidence/CAM-001/
+runs/
+output/
+outputs/
+*.avi
+*.mp4
+
+# Test images and temporary test files
+test_images/
+test.jpg
+
+# Model weights (keep a local copy; do not commit binaries)
+models/*.pt
+models/*.onnx
+models/*.engine
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Temporary
+_tmp_*.py
+*.log

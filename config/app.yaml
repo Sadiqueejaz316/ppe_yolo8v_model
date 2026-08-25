@@ -1,0 +1,70 @@
+model:
+  path: ${MODEL_PATH:-models/best.pt}
+  device: ${DEVICE:-auto}
+  confidence_threshold: ${CONFIDENCE_THRESHOLD:-0.35}
+  iou_threshold: ${IOU_THRESHOLD:-0.45}
+  imgsz: 640
+
+inference:
+  target_inference_fps: ${TARGET_FPS:-10}
+
+tracking:
+  enabled: true
+  track_high_thresh: 0.5
+  track_low_thresh: 0.1
+  new_track_thresh: 0.6
+  track_buffer: 30
+  match_thresh: 0.7
+  min_hits: 1
+
+association:
+  min_iou: 0.05
+  min_containment: 0.25
+  center_in_region: true
+  min_score: 0.25
+  head_height_ratio: 0.35
+  torso_y_start: 0.20
+  torso_y_end: 0.75
+  regions:
+    helmet: head
+    mask: head
+    safety_vest: torso
+
+# Canonical PPE names used by compliance. Aliases are matched
+# case-insensitively against the loaded model's actual class names.
+class_taxonomy:
+  person_labels:
+    - Person
+    - person
+    - people
+  ppe:
+    helmet:
+      positive: [Hardhat, Helmet, helmet, hardhat, Hard-Hat]
+      negative: [NO-Hardhat, No-Hardhat, NO-Helmet, No-Helmet, no-hardhat]
+    mask:
+      positive: [Mask, mask, Face-mask, Face Mask]
+      negative: [NO-Mask, No-Mask, no-mask]
+    safety_vest:
+      positive: [Safety Vest, safety vest, Vest, Safety-Vest]
+      negative: [NO-Safety Vest, No-Safety Vest, NO-Safety-Vest, no-safety-vest]
+
+# V1 uses a single zone. Only include classes the current model supports.
+zones:
+  general:
+    required_ppe:
+      - helmet
+      - safety_vest
+      - mask
+
+violations:
+  confirmation_seconds: ${VIOLATION_CONFIRMATION_SECONDS:-2}
+  cooldown_seconds: ${VIOLATION_COOLDOWN_SECONDS:-30}
+
+evidence:
+  directory: evidence
+  retention_days: 30
+  jpeg_quality: 90
+  events_jsonl: evidence/events.jsonl
+
+logging:
+  level: ${LOG_LEVEL:-INFO}
