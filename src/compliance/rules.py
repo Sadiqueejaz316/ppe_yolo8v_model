@@ -21,6 +21,10 @@ class ComplianceResult:
     zone: str
     confidence: float
 
+    @property
+    def overall_status(self) -> str:
+        return "COMPLIANT" if self.compliant else "NON_COMPLIANT"
+
 
 class ComplianceEngine:
     def __init__(self, zone: ZoneConfig, taxonomy: ResolvedTaxonomy) -> None:
@@ -66,3 +70,4 @@ class ComplianceEngine:
             zone=self._zone.name,
             confidence=float(confidence),
         )
+

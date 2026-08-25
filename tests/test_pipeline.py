@@ -86,6 +86,7 @@ def test_stale_inference_does_not_confirm_violation(tmp_path, monkeypatch):
         settings,
         evidence=replace(settings.evidence, directory=str(tmp_path / "evidence"), events_jsonl=str(tmp_path / "events.jsonl")),
         violations=replace(settings.violations, confirmation_seconds=2.0, cooldown_seconds=30.0),
+        visualization=replace(settings.visualization, stable_frames=1),
         project_root=Path(tmp_path),
     )
     camera = settings.cameras[0]
@@ -108,6 +109,7 @@ def test_pipeline_emits_evidence_for_confirmed_event(tmp_path):
         settings,
         evidence=replace(settings.evidence, directory=str(tmp_path / "evidence"), events_jsonl=str(tmp_path / "events.jsonl")),
         violations=replace(settings.violations, confirmation_seconds=1.0, cooldown_seconds=30.0),
+        visualization=replace(settings.visualization, stable_frames=1),
         project_root=Path(tmp_path),
     )
     detector = FakeDetector([_person_missing_helmet(), _person_missing_helmet()])
@@ -118,3 +120,47 @@ def test_pipeline_emits_evidence_for_confirmed_event(tmp_path):
     assert result.events
     assert result.events[0].evidence_path
     assert Path(result.events[0].evidence_path).exists()
+
+
+def test_pipeline_scene_summary_is_person_centric(tmp_path):
+    settings = load_settings()
+    settings = replace(
+        settings,
+        evidence=replace(settings.evidence, directory=str(tmp_path / "evidence"), events_jsonl=str(tmp_path / "events.jsonl")),
+        visualization=replace(settings.visualization, mode="person_summary", stable_frames=1),
+        project_root=Path(tmp_path),
+    )
+    detections = [
+        Detection(5, "Person", 0.9, (10, 10, 50, 70)),
+        Detection(5, "Person", 0.88, (90, 10, 130, 70)),
+        Detection(0, "Hardhat", 0.9, (18, 10, 38, 22)),
+        Detection(1, "Mask", 0.86, (24, 18, 36, 28)),
+        Detection(7, "Safety Vest", 0.88, (14, 28, 46, 60)),
+        Detection(2, "NO-Hardhat", 0.84, (100, 10, 120, 22)),
+        Detection(1, "Mask", 0.82, (104, 18, 116, 28)),
+        Detection(4, "NO-Safety Vest", 0.8, (94, 28, 126, 60)),
+    ]
+    pipeline = PPEPipeline.build(
+        settings,
+        settings.cameras[0],
+        detector=FakeDetector([detections]),
+        enable_tracking=False,
+    )
+    result = pipeline.process(_frame(datetime(2026, 1, 1, tzinfo=timezone.utc)), infer=True)
+    assert result.scene_summary["total_people"] == 2
+    people = {item["person_id"]: item for item in result.scene_summary["people"]}
+    assert {item.helmet_state() for item in result.persons} <= {"PRESENT", "MISSING", "UNKNOWN"}
+    assert any(item["overall_status"] == "NON_COMPLIANT" for item in people.values())
+    from src.viz import build_overlay_plan
+
+    plan = build_overlay_plan(
+        result.detections,
+        result.persons,
+        result.compliance,
+        pipeline.taxonomy,
+        pipeline.compliance.required_ppe,
+        visualization=settings.visualization,
+        image_shape=(80, 80),
+    )
+    assert plan.raw_boxes == ()
+    assert len(plan.persons) == 2

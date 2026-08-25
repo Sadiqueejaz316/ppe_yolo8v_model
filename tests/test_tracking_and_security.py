@@ -50,3 +50,23 @@ def test_byte_tracker_person_disappears():
     tracker.update([])
     gone = tracker.update([])
     assert gone == []
+
+
+def test_byte_tracker_person_reappears_keeps_id_within_buffer():
+    tracker = ByteTracker(
+        TrackingConfig(
+            track_high_thresh=0.4,
+            new_track_thresh=0.4,
+            match_thresh=0.3,
+            min_hits=1,
+            track_buffer=5,
+        )
+    )
+    det = Detection(1, "Person", 0.9, (10, 10, 50, 120))
+    first = tracker.update([det])
+    assert first
+    person_id = first[0].track_id
+    assert tracker.update([]) == []
+    again = tracker.update([Detection(1, "Person", 0.88, (12, 11, 51, 121))])
+    assert len(again) == 1
+    assert again[0].track_id == person_id
