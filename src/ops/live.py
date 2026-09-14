@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,22 @@ class LiveStateStore:
     def _jpeg_path(self, camera_id: str) -> Path:
         return self.root / f"{camera_id}.jpg"
 
+    def _safe_replace(self, src: Path, dst: Path) -> None:
+        for attempt in range(5):
+            try:
+                src.replace(dst)
+                return
+            except OSError:
+                if attempt == 4:
+                    try:
+                        if src.exists():
+                            dst.write_bytes(src.read_bytes())
+                            src.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    return
+                time.sleep(0.01)
+
     def write(
         self,
         camera_id: str,
@@ -89,13 +106,19 @@ class LiveStateStore:
     ) -> None:
         path = self._json_path(camera_id)
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
-        tmp.replace(path)
+        try:
+            tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
+            self._safe_replace(tmp, path)
+        except OSError:
+            pass
         if jpeg:
             jpg = self._jpeg_path(camera_id)
             jtmp = jpg.with_suffix(".jpg.tmp")
-            jtmp.write_bytes(jpeg)
-            jtmp.replace(jpg)
+            try:
+                jtmp.write_bytes(jpeg)
+                self._safe_replace(jtmp, jpg)
+            except OSError:
+                pass
 
     def read(self, camera_id: str) -> dict[str, Any] | None:
         path = self._json_path(camera_id)

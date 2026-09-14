@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,9 +20,27 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class EvidenceSaveResult:
+class EvidenceSaveResult(os.PathLike):
     path: str | None
-    is_new: bool
+    is_new: bool = True
+
+    def __fspath__(self) -> str:
+        if self.path is None:
+            raise TypeError("expected str, bytes or os.PathLike object, not None")
+        return self.path
+
+    def __str__(self) -> str:
+        return self.path or ""
+
+    def __bool__(self) -> bool:
+        return bool(self.path)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, EvidenceSaveResult):
+            return self.path == other.path
+        if isinstance(other, (str, Path)):
+            return str(self.path) == str(other)
+        return False
 
 
 class EvidenceCapture:
