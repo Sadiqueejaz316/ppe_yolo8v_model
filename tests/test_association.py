@@ -1,4 +1,4 @@
-from src.compliance.association import associate_ppe
+from src.compliance.association import PPEObservation, associate_ppe, resolve_ppe_conflict
 from src.config.settings import AssociationConfig, PPEClassAliases, TaxonomyConfig
 from src.inference.result import Detection
 from src.taxonomy import resolve_taxonomy
@@ -130,3 +130,131 @@ def test_negative_helmet_marks_missing():
     detections = [Detection(2, "NO-Hardhat", 0.87, (20, 5, 60, 40))]
     state = associate_ppe(persons, detections, taxonomy, AssociationConfig())[0]
     assert state.status_for("helmet") == "missing"
+    assert state.helmet_state() == "MISSING"
+
+
+def test_negative_mask_marks_missing():
+    taxonomy = _full_taxonomy()
+    persons = [_person(4, (0, 0, 100, 200))]
+    detections = [Detection(5, "NO-Mask", 0.9, (35, 30, 55, 55))]
+    state = associate_ppe(persons, detections, taxonomy, AssociationConfig())[0]
+    assert state.mask_state() == "MISSING"
+
+
+def test_negative_vest_marks_missing():
+    taxonomy = _full_taxonomy()
+    persons = [_person(5, (0, 0, 100, 200))]
+    detections = [Detection(6, "NO-Safety Vest", 0.9, (15, 50, 85, 140))]
+    state = associate_ppe(persons, detections, taxonomy, AssociationConfig())[0]
+    assert state.vest_state() == "MISSING"
+
+
+def test_all_negative_ppe_on_one_person():
+    taxonomy = _full_taxonomy()
+    persons = [_person(6, (0, 0, 100, 200))]
+    detections = [
+        Detection(2, "NO-Hardhat", 0.9, (20, 5, 60, 40)),
+        Detection(5, "NO-Mask", 0.88, (35, 30, 55, 55)),
+        Detection(6, "NO-Safety Vest", 0.91, (15, 50, 85, 140)),
+    ]
+    state = associate_ppe(persons, detections, taxonomy, AssociationConfig())[0]
+    assert state.helmet_state() == "MISSING"
+    assert state.mask_state() == "MISSING"
+    assert state.vest_state() == "MISSING"
+
+
+def test_two_people_different_ppe():
+    taxonomy = _full_taxonomy()
+    persons = [_person(17, (0, 0, 100, 200)), _person(21, (220, 0, 320, 200))]
+    detections = [
+        Detection(0, "Hardhat", 0.9, (20, 5, 60, 40)),
+        Detection(4, "Mask", 0.88, (35, 30, 55, 55)),
+        Detection(3, "Safety Vest", 0.91, (15, 50, 85, 140)),
+        Detection(2, "NO-Hardhat", 0.86, (240, 5, 280, 40)),
+        Detection(4, "Mask", 0.84, (250, 28, 275, 52)),
+        Detection(6, "NO-Safety Vest", 0.9, (230, 50, 310, 140)),
+    ]
+    states = associate_ppe(persons, detections, taxonomy, AssociationConfig())
+    by_id = {item.person_id: item for item in states}
+    assert by_id[17].helmet_state() == "PRESENT"
+    assert by_id[17].mask_state() == "PRESENT"
+    assert by_id[17].vest_state() == "PRESENT"
+    assert by_id[21].helmet_state() == "MISSING"
+    assert by_id[21].mask_state() == "PRESENT"
+    assert by_id[21].vest_state() == "MISSING"
+
+
+def test_three_people_different_ppe():
+    taxonomy = _full_taxonomy()
+    persons = [
+        _person(1, (0, 0, 90, 200)),
+        _person(2, (120, 0, 210, 200)),
+        _person(3, (240, 0, 330, 200)),
+    ]
+    detections = [
+        Detection(0, "Hardhat", 0.9, (20, 5, 55, 40)),
+        Detection(4, "Mask", 0.88, (30, 28, 50, 50)),
+        Detection(3, "Safety Vest", 0.9, (10, 50, 80, 140)),
+        Detection(2, "NO-Hardhat", 0.87, (140, 5, 175, 38)),
+        Detection(4, "Mask", 0.85, (150, 28, 170, 50)),
+        Detection(3, "Safety Vest", 0.86, (130, 50, 200, 140)),
+        Detection(0, "Hardhat", 0.91, (260, 5, 295, 38)),
+        Detection(5, "NO-Mask", 0.84, (270, 28, 290, 50)),
+        Detection(6, "NO-Safety Vest", 0.88, (250, 50, 320, 140)),
+    ]
+    states = associate_ppe(persons, detections, taxonomy, AssociationConfig())
+    by_id = {item.person_id: item for item in states}
+    assert by_id[1].helmet_state() == "PRESENT" and by_id[1].mask_state() == "PRESENT"
+    assert by_id[2].helmet_state() == "MISSING" and by_id[2].vest_state() == "PRESENT"
+    assert by_id[3].helmet_state() == "PRESENT" and by_id[3].mask_state() == "MISSING"
+    assert by_id[3].vest_state() == "MISSING"
+
+
+def test_ppe_near_wrong_person_stays_unassigned():
+    taxonomy = _full_taxonomy()
+    persons = [_person(1, (0, 0, 80, 160)), _person(2, (400, 0, 480, 160))]
+    detections = [Detection(0, "Hardhat", 0.92, (90, 5, 120, 35))]
+    states = associate_ppe(persons, detections, taxonomy, AssociationConfig())
+    by_id = {item.person_id: item for item in states}
+    assert by_id[1].helmet_state() == "UNKNOWN"
+    assert by_id[2].helmet_state() == "UNKNOWN"
+
+
+def test_conflicting_hardhat_prefers_higher_confidence():
+    taxonomy = _full_taxonomy()
+    persons = [_person(9, (0, 0, 100, 200))]
+    detections = [
+        Detection(0, "Hardhat", 0.92, (20, 5, 60, 40)),
+        Detection(2, "NO-Hardhat", 0.40, (22, 6, 58, 38)),
+    ]
+    state = associate_ppe(persons, detections, taxonomy, AssociationConfig())[0]
+    assert state.status_for("helmet") == "present"
+    assert state.helmet_state() == "PRESENT"
+
+
+def test_conflicting_hardhat_prefers_stronger_negative():
+    taxonomy = _full_taxonomy()
+    persons = [_person(9, (0, 0, 100, 200))]
+    detections = [
+        Detection(0, "Hardhat", 0.35, (20, 5, 60, 40)),
+        Detection(2, "NO-Hardhat", 0.93, (22, 6, 58, 38)),
+    ]
+    state = associate_ppe(persons, detections, taxonomy, AssociationConfig())[0]
+    assert state.status_for("helmet") == "missing"
+
+
+def test_resolve_conflict_tie_prefers_positive():
+    pos = PPEObservation("helmet", "positive", 0.80, (20, 5, 60, 40), "Hardhat", 0.5)
+    neg = PPEObservation("helmet", "negative", 0.80, (22, 6, 58, 38), "NO-Hardhat", 0.5)
+    chosen = resolve_ppe_conflict([pos, neg], AssociationConfig(prefer_positive_on_tie=True), person_id=1)
+    assert chosen.polarity == "positive"
+
+
+def test_empty_detections_leave_ppe_unknown():
+    taxonomy = _full_taxonomy()
+    persons = [_person(8, (0, 0, 80, 160))]
+    state = associate_ppe(persons, [], taxonomy, AssociationConfig())[0]
+    assert state.helmet_state() == "UNKNOWN"
+    assert state.mask_state() == "UNKNOWN"
+    assert state.vest_state() == "UNKNOWN"
+    assert state.person_id == 8

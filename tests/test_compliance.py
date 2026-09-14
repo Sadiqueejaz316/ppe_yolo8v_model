@@ -97,3 +97,20 @@ def test_multiple_missing_ppe():
     result = engine.evaluate(person)
     assert result.compliant is False
     assert set(result.missing_ppe) == {"helmet", "safety_vest", "mask"}
+    assert result.overall_status == "NON_COMPLIANT"
+
+
+def test_overall_status_compliant_string():
+    engine = _engine()
+    person = PersonPPEState(
+        person_id=24,
+        bbox=(0, 0, 50, 100),
+        confidence=0.9,
+        observations={
+            "helmet": _obs("helmet"),
+            "mask": _obs("mask"),
+            "safety_vest": _obs("safety_vest"),
+        },
+    )
+    result = engine.evaluate(person)
+    assert result.overall_status == "COMPLIANT"

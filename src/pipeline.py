@@ -12,6 +12,8 @@ import numpy as np
 
 from src.compliance.association import PersonPPEState, associate_ppe
 from src.compliance.rules import ComplianceEngine, ComplianceResult
+from src.compliance.stability import PPEStateStabilizer
+from src.compliance.summary import build_scene_summary
 from src.config.settings import AppConfig, CameraConfig
 from src.events.publisher import EventPublisher, LocalEventPublisher
 from src.events.temporal import TemporalViolationFilter
@@ -41,6 +43,7 @@ class ProcessedFrame:
     inferred: bool
     inference_ms: float
     metrics: MetricsSnapshot
+    scene_summary: dict
 
 
 @dataclass
@@ -52,6 +55,7 @@ class PPEPipeline:
     tracker: Tracker
     compliance: ComplianceEngine
     temporal: TemporalViolationFilter
+    stabilizer: PPEStateStabilizer
     evidence: EvidenceCapture
     publisher: EventPublisher
     metrics: PipelineMetrics
@@ -97,6 +101,7 @@ class PPEPipeline:
             tracker=tracker,
             compliance=ComplianceEngine(zone, taxonomy),
             temporal=TemporalViolationFilter(config.violations),
+            stabilizer=PPEStateStabilizer(config.visualization.stable_frames),
             evidence=EvidenceCapture(config.evidence, config.project_root),
             publisher=LocalEventPublisher(jsonl),
             metrics=PipelineMetrics(camera.id),
@@ -129,7 +134,9 @@ class PPEPipeline:
         person_dets = [det for det in detections if self.taxonomy.is_person(det.class_id)]
         tracked = self.tracker.update(person_dets, frame.image)
         persons = associate_ppe(tracked, detections, self.taxonomy, self.config.association)
+        persons = self.stabilizer.update(persons)
         compliance = [self.compliance.evaluate(person) for person in persons]
+        summary = build_scene_summary(persons, compliance, self.compliance.required_ppe)
         boxes = {person.person_id: person.bbox for person in persons}
         # Confirmation must use fresh detections. Reused boxes with a new timestamp
         # would let a single stale inference confirm a violation.
@@ -148,6 +155,7 @@ class PPEPipeline:
             self.taxonomy,
             self.compliance.required_ppe,
             timestamp=frame.timestamp,
+            visualization=self.config.visualization,
         )
         for event in events:
             evidence_path = None
@@ -198,6 +206,7 @@ class PPEPipeline:
             self.taxonomy,
             self.compliance.required_ppe,
             timestamp=frame.timestamp,
+            visualization=self.config.visualization,
         )
         return ProcessedFrame(
             frame=frame,
@@ -210,4 +219,5 @@ class PPEPipeline:
             inferred=infer,
             inference_ms=latency_ms,
             metrics=snapshot,
+            scene_summary=summary,
         )

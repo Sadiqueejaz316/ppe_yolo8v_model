@@ -17,6 +17,7 @@ import signal
 import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from src.config.settings import AppConfig, CameraConfig, load_settings
@@ -44,6 +45,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--max-seconds", type=float, default=0, help="Stop after N seconds (useful for RTSP tests)")
     parser.add_argument("--log-level", type=str, default=None)
+    parser.add_argument(
+        "--viz-mode",
+        choices=["person_summary", "minimal", "debug"],
+        default=None,
+        help="Override visualization.mode from config/app.yaml",
+    )
     return parser
 
 
@@ -131,6 +138,16 @@ def _print_metrics_console(snapshot, processed) -> None:
 def run_pipeline(args: argparse.Namespace) -> int:
     root = Path(args.config_root).resolve() if args.config_root else None
     config = load_settings(project_root=root)
+    if args.viz_mode:
+        show_raw = args.viz_mode == "debug" or config.visualization.show_raw_detections
+        config = replace(
+            config,
+            visualization=replace(
+                config.visualization,
+                mode=args.viz_mode,
+                show_raw_detections=show_raw,
+            ),
+        )
     setup_logging(args.log_level or config.logging.level)
 
     mode = _infer_mode(args)

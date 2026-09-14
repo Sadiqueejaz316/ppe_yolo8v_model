@@ -11,6 +11,10 @@ def test_load_settings_from_project_root():
     assert "general" in settings.zones
     assert settings.violations.confirmation_seconds > 0
     assert settings.association.min_score > 0
+    assert settings.visualization.mode == "person_summary"
+    assert settings.visualization.stable_frames >= 1
+    assert settings.association.regions["helmet"] == "head"
+    assert settings.association.regions["safety_vest"] == "torso"
 
 
 def test_paths_do_not_depend_on_cwd(tmp_path, monkeypatch):

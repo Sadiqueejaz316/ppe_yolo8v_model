@@ -21,16 +21,22 @@ Normalized detections
         ↓
 Person tracking (temporary IDs)
         ↓
-PPE ↔ person association
+PPE ↔ person association (head/torso regions)
+        ↓
+PersonPPEState (one helmet / mask / vest status per person)
+        ↓
+Short display-state hold (stop overlay flicker)
         ↓
 Compliance rules
         ↓
 Temporal confirmation + cooldown
         ↓
+Person-centric visualization
+        ↓
 Violation event + evidence image
 ```
 
-Detecting a `Hardhat` somewhere in the frame does **not** mean a given worker is wearing a helmet. Association and compliance are separate modules.
+Detecting a `Hardhat` somewhere in the frame does **not** mean a given worker is wearing a helmet. Association and compliance are separate modules. The overlay draws **people**, not every raw YOLO box.
 
 ## 2. Architecture
 
@@ -47,10 +53,13 @@ src/
   taxonomy.py                 Map actual model class names → canonical PPE
   compliance/association.py   Spatial PPE-to-person assignment
   compliance/rules.py         Zone required-PPE evaluation
+  compliance/stability.py     Short frame-count hold for overlay PPE state
+  compliance/summary.py       Operator/UI snapshot (person-centric)
   events/temporal.py          Confirmation + cooldown
   events/violation.py         PPEViolationEvent
   evidence/capture.py         Save annotated frames for confirmed events only
   pipeline.py                 End-to-end per-frame orchestration
+  viz.py                      Person-centric overlay (raw boxes only in debug)
   main.py                     image / video / rtsp entry point
 ```
 
@@ -123,7 +132,9 @@ python -m src.inference.test_model --image test_images/test.jpg
 python -m src.main --mode image --source test_images/test.jpg --no-display --save-output outputs/test_image.jpg
 ```
 
-A single image shows detections, person IDs, and per-person PPE state. It does **not** emit a confirmed violation: temporal confirmation requires the condition to persist.
+A single image shows tracked person boxes and compact per-person PPE status. It does **not** emit a confirmed violation: temporal confirmation requires the condition to persist.
+
+Production overlay (`visualization.mode: person_summary`) does **not** draw independent Hardhat / Mask / Vest boxes. Use `--viz-mode debug` to inspect raw YOLO detections.
 
 ## 7. Video inference
 
@@ -253,6 +264,26 @@ Class names and IDs are read from `best.pt`, not assumed in code. This checkpoin
 
 Canonical PPE types used by compliance: `helmet`, `mask`, `safety_vest`.
 
+Positive and negative classes are **not** shown as six independent statuses. After association they collapse to one state per person:
+
+| Model classes | Person field | Values |
+| --- | --- | --- |
+| Hardhat / NO-Hardhat | helmet | PRESENT, MISSING, UNKNOWN |
+| Mask / NO-Mask | mask | PRESENT, MISSING, UNKNOWN |
+| Safety Vest / NO-Safety Vest | vest (`safety_vest`) | PRESENT, MISSING, UNKNOWN |
+
+Compliance then maps required items to `COMPLIANT` / `NON_COMPLIANT` per person.
+
+If both a positive and a negative class associate to the same person (for example Hardhat **and** NO-Hardhat), resolution is deterministic:
+
+1. Each PPE box is assigned to at most one person (highest association score × confidence).
+2. Helmet/mask use the **head** region of the person box; vest uses the **torso** region (`association.regions` in `config/app.yaml`).
+3. For that person and PPE category, compare `rank = confidence × association_score`.
+4. If the better rank exceeds the other by `conflict_margin` (default 15%), take it.
+5. Otherwise take the higher detector confidence.
+6. Exact remaining ties prefer **present** (`prefer_positive_on_tie: true`).
+7. The choice is logged at DEBUG as `PPE_CONFLICT`.
+
 Aliases are configured in `config/app.yaml` under `class_taxonomy`. If a future checkpoint uses different strings, update that mapping. Do not retrain for V1.
 
 ## 12. Compliance logic
@@ -304,7 +335,52 @@ evidence/
   events.jsonl
 ```
 
-Images include bounding boxes, person ID, missing PPE labels, timestamp, and camera ID. Retention is `evidence.retention_days` (default 30).
+Images include the person box, compact PPE status, timestamp, and camera ID. Retention is `evidence.retention_days` (default 30).
+
+## Visualization (person-centric overlay)
+
+Drawing every YOLO class as an equally prominent box (Person, Hardhat, NO-Hardhat, Mask, …) makes crowded frames unreadable. Association already knows which PPE belongs to which track; the overlay uses that.
+
+```
+YOLO detections
+      ↓
+Person tracking (stable ID)
+      ↓
+PPE association (head / torso)
+      ↓
+PersonPPEState  (helmet, mask, vest)
+      ↓
+Display-state hold (visualization.stable_frames)
+      ↓
+Compliance
+      ↓
+Visualization
+```
+
+Configure in `config/app.yaml`:
+
+```yaml
+visualization:
+  mode: person_summary   # person_summary | minimal | debug
+  show_raw_detections: false
+  show_person_id: true
+  show_ppe_status: true
+  show_overall_status: true
+  crowd_compact_threshold: 8
+  stable_frames: 3
+```
+
+| Mode | What the operator sees |
+| --- | --- |
+| `person_summary` (default) | Person box colored by overall compliance, compact `+Helmet xMask +Vest` label (ASCII; OpenCV Hershey fonts cannot draw Unicode checkmarks), HUD counts |
+| `minimal` | Person box + overall `COMPLIANT` / `NON_COMPLIANT` |
+| `debug` | Raw YOLO boxes **and** the person summary (for model inspection) |
+
+Override from the CLI: `--viz-mode debug`.
+
+`ProcessedFrame.scene_summary` is the data interface for a future side panel / dashboard (`total_people`, `compliant`, `violations`, per-person helmet/mask/vest/overall_status). V1 does not add a separate frontend.
+
+`visualization.stable_frames` holds helmet/mask/vest polarity until that many consecutive frames agree, so the overlay does not flash `NO HELMET` / `HELMET` on a noisy pair of frames. Violation **events** still use `violations.confirmation_seconds`.
 
 ## 15. Testing
 
@@ -318,12 +394,13 @@ Coverage includes:
 - model class mapping and box conversion
 - invalid RTSP URL / open failure / reconnect
 - helmet assigned to the correct person, not an unrelated worker
-- overlapping workers
+- overlapping workers, multi-person PPE, conflicting Hardhat / NO-Hardhat
 - all PPE present → compliant; helmet missing → violation
 - one bad frame → no event; persistent miss → one event; cooldown → still one event
+- overlay flicker hold; person-centric vs debug visualization
 - evidence write path
 
-Tests mock cameras and frames. A physical RTSP camera is not required.
+Tests mock cameras and frames. Association, compliance, and visualization tests use synthetic `Detection` objects and do **not** load `best.pt`. A physical RTSP camera is not required.
 
 ## 16. Troubleshooting
 
@@ -335,7 +412,8 @@ Tests mock cameras and frames. A physical RTSP camera is not required.
 | No display window | WSL/headless has no GUI. Use `--no-display` and `--save-output`. |
 | Slow first frame | Ultralytics/PyTorch warmup. V1 warms the model at startup; later frames are faster. |
 | GPU requested but CPU used | `torch.cuda.is_available()` is false, or CUDA error triggered fallback. |
-| Every frame is a violation | Increase `VIOLATION_CONFIRMATION_SECONDS`. Check association overlay before trusting events. |
+| Every frame is a violation | Increase `VIOLATION_CONFIRMATION_SECONDS`. Check the person-centric overlay before trusting events. |
+| Cluttered overlay / six boxes per person | Production mode is `person_summary`. Use `--viz-mode debug` only when inspecting raw YOLO output. |
 | Duplicate alerts | Increase `VIOLATION_COOLDOWN_SECONDS`. |
 | Wrong PPE mapping | Print classes with `python -m src.inference.test_model` and edit `class_taxonomy`. |
 
@@ -347,6 +425,7 @@ python -m src.inference.test_model --image test_images/test.jpg
 
 # Image
 python -m src.main --mode image --source test_images/test.jpg --no-display --save-output outputs/test_image.jpg
+python -m src.main --mode image --source test_images/test.jpg --no-display --viz-mode debug --save-output outputs/test_debug.jpg
 
 # Video
 python -m src.main --mode video --source test_images/test.mp4 --no-display

@@ -92,6 +92,10 @@ class TrackingConfig:
     min_hits: int = 1
 
 
+def _default_association_regions() -> dict[str, str]:
+    return {"helmet": "head", "mask": "head", "safety_vest": "torso"}
+
+
 @dataclass(frozen=True)
 class AssociationConfig:
     min_iou: float = 0.05
@@ -101,7 +105,24 @@ class AssociationConfig:
     head_height_ratio: float = 0.35
     torso_y_start: float = 0.20
     torso_y_end: float = 0.75
-    regions: dict[str, str] = field(default_factory=dict)
+    conflict_margin: float = 0.15
+    prefer_positive_on_tie: bool = True
+    regions: dict[str, str] = field(default_factory=_default_association_regions)
+
+
+@dataclass(frozen=True)
+class VisualizationConfig:
+    """Operator overlay. Detection itself is unchanged."""
+
+    mode: str = "person_summary"
+    show_raw_detections: bool = False
+    show_person_id: bool = True
+    show_ppe_status: bool = True
+    show_overall_status: bool = True
+    crowd_compact_threshold: int = 8
+    label_above_box: bool = True
+    stable_frames: int = 3
+    hud_violation_rows: int = 8
 
 
 @dataclass(frozen=True)
@@ -162,6 +183,7 @@ class AppConfig:
     inference: InferenceConfig
     tracking: TrackingConfig
     association: AssociationConfig
+    visualization: VisualizationConfig
     taxonomy: TaxonomyConfig
     zones: dict[str, ZoneConfig]
     violations: ViolationConfig
@@ -232,6 +254,26 @@ def _parse_camera(raw: dict[str, Any]) -> CameraConfig:
     )
 
 
+_VALID_VIZ_MODES = ("person_summary", "minimal", "debug")
+
+
+def _parse_visualization(raw: dict[str, Any]) -> VisualizationConfig:
+    mode = str(raw.get("mode") or "person_summary").strip().lower()
+    if mode not in _VALID_VIZ_MODES:
+        mode = "person_summary"
+    return VisualizationConfig(
+        mode=mode,
+        show_raw_detections=_as_bool(raw.get("show_raw_detections"), False),
+        show_person_id=_as_bool(raw.get("show_person_id"), True),
+        show_ppe_status=_as_bool(raw.get("show_ppe_status"), True),
+        show_overall_status=_as_bool(raw.get("show_overall_status"), True),
+        crowd_compact_threshold=_as_int(raw.get("crowd_compact_threshold"), 8),
+        label_above_box=_as_bool(raw.get("label_above_box"), True),
+        stable_frames=_as_int(raw.get("stable_frames"), 3),
+        hud_violation_rows=_as_int(raw.get("hud_violation_rows"), 8),
+    )
+
+
 def load_settings(
     project_root: Path | None = None,
     app_yaml: Path | None = None,
@@ -253,6 +295,7 @@ def load_settings(
     inference_raw = app_raw.get("inference") or {}
     tracking_raw = app_raw.get("tracking") or {}
     association_raw = app_raw.get("association") or {}
+    visualization_raw = app_raw.get("visualization") or {}
     taxonomy_raw = app_raw.get("class_taxonomy") or {}
     zones_raw = app_raw.get("zones") or {}
     violations_raw = app_raw.get("violations") or {}
@@ -302,8 +345,16 @@ def load_settings(
             head_height_ratio=_as_float(association_raw.get("head_height_ratio"), 0.35),
             torso_y_start=_as_float(association_raw.get("torso_y_start"), 0.20),
             torso_y_end=_as_float(association_raw.get("torso_y_end"), 0.75),
-            regions={str(k): str(v) for k, v in (association_raw.get("regions") or {}).items()},
+            conflict_margin=_as_float(association_raw.get("conflict_margin"), 0.15),
+            prefer_positive_on_tie=_as_bool(association_raw.get("prefer_positive_on_tie"), True),
+            regions={
+                str(k): str(v)
+                for k, v in (
+                    association_raw.get("regions") or _default_association_regions()
+                ).items()
+            },
         ),
+        visualization=_parse_visualization(visualization_raw),
         taxonomy=_parse_taxonomy(taxonomy_raw),
         zones=zones,
         violations=ViolationConfig(

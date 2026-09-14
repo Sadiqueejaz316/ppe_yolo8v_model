@@ -6,7 +6,7 @@ model:
   imgsz: 640
 
 inference:
-  target_inference_fps: ${TARGET_FPS:-10}
+  target_inference_fps: ${TARGET_FPS:-20}
 
 tracking:
   enabled: true
@@ -25,10 +25,27 @@ association:
   head_height_ratio: 0.35
   torso_y_start: 0.20
   torso_y_end: 0.75
+  # Relative rank gap that decides Hardhat vs NO-Hardhat (and mask/vest).
+  # Below this margin, higher detector confidence wins; exact ties prefer present.
+  conflict_margin: 0.15
+  prefer_positive_on_tie: true
   regions:
     helmet: head
     mask: head
     safety_vest: torso
+
+visualization:
+  # person_summary | minimal | debug
+  mode: minimal
+  show_raw_detections: false
+  show_person_id: true
+  show_ppe_status: true
+  show_overall_status: true
+  crowd_compact_threshold: 8
+  label_above_box: true
+  # Consecutive frames of the same PPE polarity before the overlay/state flips.
+  stable_frames: 3
+  hud_violation_rows: 8
 
 # Canonical PPE names used by compliance. Aliases are matched
 # case-insensitively against the loaded model's actual class names.
@@ -54,10 +71,10 @@ zones:
     required_ppe:
       - helmet
       - safety_vest
-      - mask
+      #- mask
 
 violations:
-  confirmation_seconds: ${VIOLATION_CONFIRMATION_SECONDS:-2}
+  confirmation_seconds: ${VIOLATION_CONFIRMATION_SECONDS:-5}
   cooldown_seconds: ${VIOLATION_COOLDOWN_SECONDS:-30}
 
 evidence:
