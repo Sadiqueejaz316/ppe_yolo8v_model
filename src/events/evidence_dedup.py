@@ -65,7 +65,7 @@ class EvidenceDeduplicator:
     def __init__(
         self,
         cooldown_seconds: float = 30.0,
-        repeat_active_violations: bool = True,
+        repeat_active_violations: bool = False,
         spatial_iou_threshold: float = 0.2,
     ) -> None:
         self.cooldown_seconds = max(0.0, float(cooldown_seconds))
@@ -74,6 +74,9 @@ class EvidenceDeduplicator:
         self._lock = threading.Lock()
         self._records: dict[str, EvidenceRecord] = {}
         self._aliases: dict[tuple[str, str], str] = {}  # (camera_id, alias_id) -> primary_worker_id
+        # Tracks seen in the most recent inference, per camera. Used so that two
+        # workers standing close together are not merged into one episode.
+        self._active_tracks: dict[str, tuple[set[str], datetime]] = {}
 
     @staticmethod
     def make_key(camera_id: str, worker_id: str | int, signature: str | None = None) -> str:
@@ -89,6 +92,29 @@ class EvidenceDeduplicator:
 
     def _merge_signature(self, existing: str, incoming: str) -> str:
         return normalize_violation_signature(f"{existing}+{incoming}")
+
+    def note_active_tracks(
+        self,
+        camera_id: str,
+        track_ids: Sequence[str | int],
+        timestamp: datetime,
+    ) -> None:
+        """Record which track IDs are simultaneously visible on a camera.
+
+        A track that is alive in the same frame as an existing episode is a
+        different worker, so spatial continuity must not alias the two.
+        """
+        with self._lock:
+            self._active_tracks[camera_id] = ({str(t) for t in track_ids}, timestamp)
+
+    def _concurrent_track_ids(self, camera_id: str, timestamp: datetime) -> set[str]:
+        entry = self._active_tracks.get(camera_id)
+        if entry is None:
+            return set()
+        ids, seen_at = entry
+        if abs((timestamp - seen_at).total_seconds()) > 2.0:
+            return set()
+        return ids
 
     def evidence_path(self, camera_id: str, worker_id: str | int) -> str | None:
         worker_str = str(worker_id)
@@ -117,6 +143,8 @@ class EvidenceDeduplicator:
         """
         signature = normalize_violation_signature(violation_items)
         worker_str = str(worker_id)
+        if self.cooldown_seconds <= 0:
+            return True
 
         with self._lock:
             # 0. Check worker ID alias (from spatial continuity)
@@ -169,7 +197,7 @@ class EvidenceDeduplicator:
                 return True
 
             # 2. Spatial continuity fallback for ByteTrack ID switching
-            matched = self._best_spatial_match(camera_id, timestamp, bbox)
+            matched = self._best_spatial_match(camera_id, timestamp, bbox, worker_str)
             if matched is not None:
                 existing, overlap = matched
                 logger.info(
@@ -214,12 +242,18 @@ class EvidenceDeduplicator:
         camera_id: str,
         timestamp: datetime,
         bbox: BBox | None,
+        worker_id: str | None = None,
     ) -> tuple[EvidenceRecord, float] | None:
         if bbox is None or self.spatial_iou_threshold <= 0:
             return None
+        # A track that is visible at the same time as the episode owner belongs to
+        # a different worker, even when the two boxes overlap heavily.
+        concurrent = self._concurrent_track_ids(camera_id, timestamp)
         best: tuple[EvidenceRecord, float] | None = None
         for existing in self._records.values():
             if existing.camera_id != camera_id or not existing.active or existing.bbox is None:
+                continue
+            if existing.worker_id != worker_id and existing.worker_id in concurrent:
                 continue
             elapsed = (timestamp - existing.timestamp).total_seconds()
             if elapsed >= self.cooldown_seconds:
@@ -318,6 +352,15 @@ class EvidenceDeduplicator:
                     stale_keys.append(key)
             for k in stale_keys:
                 self._records.pop(k, None)
+            # Aliases outlive their episode otherwise, which leaks memory on a
+            # long live run and can re-point a recycled track ID at a dead record.
+            live_workers = {(r.camera_id, r.worker_id) for r in self._records.values()}
+            for alias_key, primary in list(self._aliases.items()):
+                if (alias_key[0], primary) not in live_workers:
+                    self._aliases.pop(alias_key, None)
+            for cam_id, (_ids, seen_at) in list(self._active_tracks.items()):
+                if (cutoff_time - seen_at).total_seconds() >= max_age:
+                    self._active_tracks.pop(cam_id, None)
 
         return len(stale_keys)
 
@@ -326,3 +369,4 @@ class EvidenceDeduplicator:
         with self._lock:
             self._records.clear()
             self._aliases.clear()
+            self._active_tracks.clear()

@@ -16,6 +16,16 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+JPEG_SOI = b"\xff\xd8"
+JPEG_EOI = b"\xff\xd9"
+
+
+def is_complete_jpeg(data: bytes | None) -> bool:
+    """True when bytes look like a finished JPEG (SOI + EOI)."""
+    if not data or len(data) < 4:
+        return False
+    return data[:2] == JPEG_SOI and data[-2:] == JPEG_EOI
+
 
 class LiveFrameBuffer:
     """Thread-safe per-camera latest-frame in-memory buffer.
@@ -109,16 +119,16 @@ class LiveStateStore:
         try:
             tmp.write_text(json.dumps(payload, default=str), encoding="utf-8")
             self._safe_replace(tmp, path)
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.warning("LIVE_JSON_WRITE_FAILED camera=%s error=%s", camera_id, exc)
         if jpeg:
             jpg = self._jpeg_path(camera_id)
             jtmp = jpg.with_suffix(".jpg.tmp")
             try:
                 jtmp.write_bytes(jpeg)
                 self._safe_replace(jtmp, jpg)
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.warning("LIVE_JPEG_WRITE_FAILED camera=%s error=%s", camera_id, exc)
 
     def read(self, camera_id: str) -> dict[str, Any] | None:
         path = self._json_path(camera_id)
@@ -131,11 +141,14 @@ class LiveStateStore:
         if not isinstance(payload, dict):
             return None
         payload["_mtime"] = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
-        payload["_has_jpeg"] = self._jpeg_path(camera_id).is_file()
+        payload["_has_jpeg"] = self._jpeg_is_readable(camera_id)
         return payload
 
     def list_camera_ids(self) -> list[str]:
         return sorted(path.stem for path in self.root.glob("*.json"))
+
+    def _jpeg_is_readable(self, camera_id: str) -> bool:
+        return self.jpeg_bytes(camera_id) is not None
 
     def jpeg_bytes(self, camera_id: str) -> bytes | None:
         path = self._jpeg_path(camera_id)
@@ -143,6 +156,10 @@ class LiveStateStore:
             return None
         try:
             data = path.read_bytes()
-        except OSError:
+        except OSError as exc:
+            logger.warning("LIVE_JPEG_READ_FAILED camera=%s error=%s", camera_id, exc)
             return None
-        return data or None
+        if not is_complete_jpeg(data):
+            logger.warning("LIVE_JPEG_INCOMPLETE camera=%s bytes=%s", camera_id, len(data) if data else 0)
+            return None
+        return data

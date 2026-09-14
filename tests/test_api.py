@@ -9,7 +9,7 @@ from src.api.paths import resolve_evidence_file
 from src.config.settings import load_settings
 from src.events.store import EventStore
 from src.events.violation import PPEViolationEvent
-from src.ops.live import LiveStateStore
+from src.ops.live import LiveFrameBuffer, LiveStateStore
 
 
 def _app(tmp_path: Path, mock: bool = False, seed_event: bool = False, live: bool = False):
@@ -102,7 +102,7 @@ def _app(tmp_path: Path, mock: bool = False, seed_event: bool = False, live: boo
                     ],
                 },
             },
-            jpeg=b"\xff\xd8\xff",
+            jpeg=b"\xff\xd8\xff\xd9",
         )
     return TestClient(create_app(settings))
 
@@ -226,8 +226,6 @@ def test_event_filter_by_camera_and_type(tmp_path):
 
 
 def test_snapshot_from_memory_no_disk(tmp_path):
-    from src.ops.live import LiveFrameBuffer
-
     settings = load_settings()
     settings = replace(
         settings,
@@ -253,3 +251,23 @@ def test_snapshot_from_memory_no_disk(tmp_path):
     assert resp.status_code == 200
     assert resp.content == memory_jpeg
     assert not disk_jpg.exists()
+
+
+def test_snapshot_rejects_incomplete_disk_jpeg(tmp_path):
+    settings = load_settings()
+    settings = replace(
+        settings,
+        dashboard=replace(
+            settings.dashboard,
+            sqlite_path=str(tmp_path / "ppe.sqlite"),
+            live_dir=str(tmp_path / "live"),
+            mock_data=False,
+        ),
+        project_root=Path(tmp_path),
+    )
+    live_dir = tmp_path / "live"
+    live_dir.mkdir(parents=True, exist_ok=True)
+    (live_dir / "CAM-001.jpg").write_bytes(b"\xff\xd8\xff")
+    client = TestClient(create_app(settings, frame_buffer=LiveFrameBuffer()))
+    resp = client.get("/api/cameras/CAM-001/snapshot")
+    assert resp.status_code == 404

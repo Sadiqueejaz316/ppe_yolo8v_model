@@ -19,28 +19,34 @@ from src.exceptions import EvidenceError
 logger = logging.getLogger(__name__)
 
 
+EVIDENCE_NEW = "new"
+EVIDENCE_REUSED = "reused"
+EVIDENCE_SUPPRESSED = "suppressed"
+
+
 @dataclass(frozen=True)
-class EvidenceSaveResult(os.PathLike):
+class EvidenceSaveResult:
+    """Outcome of an evidence capture attempt.
+
+    ``new`` is the only status that may publish an event or insert a dashboard
+    row. ``reused`` points at the JPEG of the still-active episode, ``suppressed``
+    means the episode is on cooldown with no image to show.
+    """
+
     path: str | None
-    is_new: bool = True
+    status: str
 
-    def __fspath__(self) -> str:
-        if self.path is None:
-            raise TypeError("expected str, bytes or os.PathLike object, not None")
-        return self.path
+    @property
+    def is_new(self) -> bool:
+        return self.status == EVIDENCE_NEW
 
-    def __str__(self) -> str:
-        return self.path or ""
+    @property
+    def is_reused(self) -> bool:
+        return self.status == EVIDENCE_REUSED
 
-    def __bool__(self) -> bool:
-        return bool(self.path)
-
-    def __eq__(self, other: object) -> bool:
-        if isinstance(other, EvidenceSaveResult):
-            return self.path == other.path
-        if isinstance(other, (str, Path)):
-            return str(self.path) == str(other)
-        return False
+    @property
+    def is_suppressed(self) -> bool:
+        return self.status == EVIDENCE_SUPPRESSED
 
 
 class EvidenceCapture:
@@ -58,7 +64,8 @@ class EvidenceCapture:
         else:
             self._deduplicator = EvidenceDeduplicator(
                 cooldown_seconds=getattr(config, "cooldown_seconds", 30.0),
-                repeat_active_violations=getattr(config, "repeat_active_violations", True),
+                repeat_active_violations=getattr(config, "repeat_active_violations", False),
+                spatial_iou_threshold=getattr(config, "spatial_iou_threshold", 0.2),
             )
 
     @property
@@ -82,9 +89,10 @@ class EvidenceCapture:
                 bbox=event.bbox,
             )
             if not allowed:
+                existing = self._deduplicator.evidence_path(event.camera_id, event.person_id)
                 return EvidenceSaveResult(
-                    path=self._deduplicator.evidence_path(event.camera_id, event.person_id),
-                    is_new=False,
+                    path=existing,
+                    status=EVIDENCE_REUSED if existing else EVIDENCE_SUPPRESSED,
                 )
 
         day = event.timestamp.strftime("%Y-%m-%d")
@@ -96,14 +104,23 @@ class EvidenceCapture:
             raise EvidenceError(f"Could not create evidence directory: {exc}") from exc
 
         path = directory / f"event-{event.event_id}.jpg"
+        # Write to a temp file and rename: the dashboard must never read a
+        # half-written JPEG while the pipeline is encoding.
+        # Extension stays .jpg: cv2 picks the encoder from it.
+        tmp_path = path.with_name(f".{path.stem}.tmp.jpg")
         try:
             import cv2
 
-            ok = cv2.imwrite(str(path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), int(self._config.jpeg_quality)])
+            ok = cv2.imwrite(str(tmp_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), int(self._config.jpeg_quality)])
             if not ok:
                 raise OSError("cv2.imwrite returned False")
+            os.replace(tmp_path, path)
         except OSError as exc:
             logger.error("EVIDENCE_WRITE_FAILED path=%s error=%s", path, exc)
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
             raise EvidenceError(f"Could not write evidence image: {exc}") from exc
 
         str_path = str(path)
@@ -116,7 +133,7 @@ class EvidenceCapture:
             bbox=event.bbox,
         )
         logger.info("EVIDENCE_SAVED camera=%s event=%s path=%s", event.camera_id, event.event_id, path)
-        return EvidenceSaveResult(path=str_path, is_new=True)
+        return EvidenceSaveResult(path=str_path, status=EVIDENCE_NEW)
 
     def prune(self, now: datetime | None = None) -> int:
         days = max(0, int(self._config.retention_days))

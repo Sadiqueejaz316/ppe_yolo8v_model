@@ -8,6 +8,8 @@ def test_load_settings_from_project_root():
     assert settings.model.path.endswith("best.pt")
     assert settings.cameras
     assert settings.cameras[0].id
+    assert settings.cameras[0].confidence_threshold is None
+    assert settings.model.confidence_threshold == 0.35
     assert "general" in settings.zones
     assert settings.violations.confirmation_seconds > 0
     assert settings.association.min_score > 0

@@ -67,6 +67,16 @@ def test_4_thirty_seconds_allowed():
     assert dedup.check_and_reserve("CAM-001", 17, "helmet", t130) is True
 
 
+def test_active_episode_does_not_repeat_after_cooldown_by_default():
+    dedup = EvidenceDeduplicator(cooldown_seconds=30.0)
+    t0 = datetime(2026, 9, 9, 12, 0, 0, tzinfo=timezone.utc)
+
+    assert dedup.check_and_reserve("CAM-001", 17, "helmet", t0) is True
+    assert dedup.check_and_reserve(
+        "CAM-001", 17, "helmet", t0 + timedelta(seconds=30)
+    ) is False
+
+
 def test_5_different_worker_allowed():
     dedup = EvidenceDeduplicator(cooldown_seconds=30.0)
     t100 = datetime(2026, 9, 9, 12, 0, 0, tzinfo=timezone.utc)
@@ -261,6 +271,74 @@ def test_present_flicker_does_not_reopen_cooldown():
     assert dedup.check_and_reserve("CAM-001", 17, "helmet", t100) is True
     dedup.resolve_violation("CAM-001", 17, "helmet")
     assert dedup.check_and_reserve("CAM-001", 17, "helmet", t105) is False
+
+
+def test_reused_vs_suppressed_status(tmp_path):
+    config = EvidenceConfig(directory=str(tmp_path / "evidence"), cooldown_seconds=30.0)
+    capture = EvidenceCapture(config, project_root=Path(tmp_path))
+    frame = np.zeros((32, 32, 3), dtype=np.uint8)
+    t0 = datetime(2026, 9, 9, 12, 0, 0, tzinfo=timezone.utc)
+
+    first = capture.save(frame, _event(person_id=17, missing="helmet", ts=t0))
+    assert first.status == "new" and first.is_new
+
+    second = capture.save(frame, _event(person_id=17, missing="mask", ts=t0 + timedelta(seconds=2)))
+    assert second.status == "reused"
+    assert second.is_new is False
+    assert second.path == first.path
+
+    # Slot reserved but never written (crash between reserve and imwrite).
+    capture.deduplicator.check_and_reserve("CAM-001", 42, "helmet", t0)
+    third = capture.save(frame, _event(person_id=42, missing="helmet", ts=t0 + timedelta(seconds=1)))
+    assert third.status == "suppressed"
+    assert third.path is None
+    assert len(list((tmp_path / "evidence").rglob("*.jpg"))) == 1
+
+
+def test_evidence_write_is_atomic(tmp_path):
+    config = EvidenceConfig(directory=str(tmp_path / "evidence"), cooldown_seconds=30.0)
+    capture = EvidenceCapture(config, project_root=Path(tmp_path))
+    saved = capture.save(np.zeros((16, 16, 3), dtype=np.uint8), _event())
+    assert Path(saved.path).exists()
+    assert not list((tmp_path / "evidence").rglob("*.tmp.jpg"))
+
+
+def test_concurrent_close_workers_are_not_merged():
+    dedup = EvidenceDeduplicator(cooldown_seconds=30.0, spatial_iou_threshold=0.2)
+    t0 = datetime(2026, 9, 9, 12, 0, 0, tzinfo=timezone.utc)
+    bbox_a = (0.0, 0.0, 100.0, 200.0)
+    bbox_b = (55.0, 0.0, 155.0, 200.0)  # overlaps heavily but is another worker
+
+    dedup.note_active_tracks("CAM-001", [17, 18], t0)
+    assert dedup.check_and_reserve("CAM-001", 17, "helmet", t0, bbox=bbox_a) is True
+    assert dedup.check_and_reserve("CAM-001", 18, "helmet", t0, bbox=bbox_b) is True
+
+
+def test_id_switch_still_suppressed_when_old_track_is_gone():
+    dedup = EvidenceDeduplicator(cooldown_seconds=30.0, spatial_iou_threshold=0.2)
+    t0 = datetime(2026, 9, 9, 12, 0, 0, tzinfo=timezone.utc)
+    t3 = t0 + timedelta(seconds=3)
+    bbox_old = (0.0, 0.0, 100.0, 200.0)
+    bbox_new = (55.0, 0.0, 155.0, 200.0)
+
+    dedup.note_active_tracks("CAM-001", [17], t0)
+    assert dedup.check_and_reserve("CAM-001", 17, "helmet", t0, bbox=bbox_old) is True
+    # Track 17 disappeared, ByteTrack re-assigned the same worker to 24.
+    dedup.note_active_tracks("CAM-001", [24], t3)
+    assert dedup.check_and_reserve("CAM-001", 24, "helmet", t3, bbox=bbox_new) is False
+
+
+def test_prune_drops_stale_aliases():
+    dedup = EvidenceDeduplicator(cooldown_seconds=10.0, spatial_iou_threshold=0.2)
+    t0 = datetime(2026, 9, 9, 12, 0, 0, tzinfo=timezone.utc)
+    bbox = (0.0, 0.0, 100.0, 200.0)
+    dedup.check_and_reserve("CAM-001", 17, "helmet", t0, bbox=bbox)
+    dedup.check_and_reserve("CAM-001", 24, "helmet", t0, bbox=bbox)
+    assert dedup._aliases
+
+    dedup.prune(t0 + timedelta(seconds=300))
+    assert dedup._records == {}
+    assert dedup._aliases == {}
 
 
 def test_cooldown_zero_disables_deduplication():

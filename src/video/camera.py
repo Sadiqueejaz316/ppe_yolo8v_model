@@ -11,13 +11,17 @@ from typing import Any
 import numpy as np
 
 from src.config.settings import CameraConfig
-from src.exceptions import CameraConnectionError, InvalidSourceError
+from src.exceptions import CameraConnectionError, FRAME_RUNTIME_ERRORS, InvalidSourceError
 from src.security import redact_rtsp_url
 from src.video.source import VideoFrame, VideoSource
 
 logger = logging.getLogger(__name__)
 
 CaptureFactory = Callable[..., Any]
+
+# Consecutive failed reads before treating the stream as disconnected.
+READ_FAILURES_BEFORE_RECONNECT = 3
+RECONNECT_BACKOFF_CAP_S = 30.0
 
 
 def _set_capture_option(capture: Any, prop: str, value: float) -> None:
@@ -57,6 +61,7 @@ class RTSPCamera(VideoSource):
         self._measured_fps = 0.0
         self._last_ok_ts: float | None = None
         self._skip_counter = 0
+        self._consecutive_read_failures = 0
 
     @property
     def camera_id(self) -> str:
@@ -95,18 +100,24 @@ class RTSPCamera(VideoSource):
                 self.connect()
             except CameraConnectionError:
                 logger.warning(
-                    "CAMERA_DISCONNECTED camera=%s reason=initial_open_failed",
+                    "CAMERA_DISCONNECTED camera=%s reason=initial_open_failed; will retry",
                     self.camera_id,
                 )
         while not self._stop.is_set():
-            if not self._connected:
+            if not self._connected or self._capture is None:
                 self._reconnect()
                 if not self._connected:
                     continue
             frame = self._read_frame()
             if frame is None:
+                if self._stop.is_set():
+                    break
+                if self._consecutive_read_failures < READ_FAILURES_BEFORE_RECONNECT:
+                    self._sleep_interruptible(0.05)
+                    continue
                 self._handle_disconnect()
                 continue
+            self._consecutive_read_failures = 0
             if not self._accept_skip():
                 self._dropped_frames += 1
                 continue
@@ -146,25 +157,34 @@ class RTSPCamera(VideoSource):
             logger.error("CAMERA_INVALID_URL camera=%s url=%s", self.camera_id, redacted)
             raise InvalidSourceError(f"Camera {self.camera_id} RTSP URL is invalid")
 
-        capture = self._create_capture(url)
-        timeout_ms = max(1.0, float(self._config.connection_timeout)) * 1000.0
-        read_ms = max(1.0, float(self._config.read_timeout)) * 1000.0
-        _set_capture_option(capture, "CAP_PROP_OPEN_TIMEOUT_MSEC", timeout_ms)
-        _set_capture_option(capture, "CAP_PROP_READ_TIMEOUT_MSEC", read_ms)
-        _set_capture_option(capture, "CAP_PROP_BUFFERSIZE", 1)
-
+        capture: Any = None
         opened = False
         try:
+            capture = self._create_capture(url)
+            timeout_ms = max(1.0, float(self._config.connection_timeout)) * 1000.0
+            read_ms = max(1.0, float(self._config.read_timeout)) * 1000.0
+            _set_capture_option(capture, "CAP_PROP_OPEN_TIMEOUT_MSEC", timeout_ms)
+            _set_capture_option(capture, "CAP_PROP_READ_TIMEOUT_MSEC", read_ms)
+            # Keep only the newest decoder frame so reconnects do not replay stale video.
+            _set_capture_option(capture, "CAP_PROP_BUFFERSIZE", 1)
             opened = bool(capture.isOpened())
-        except Exception as exc:
-            logger.error("CAMERA_OPEN_EXCEPTION camera=%s error=%s", self.camera_id, exc)
+        except InvalidSourceError:
+            raise
+        except FRAME_RUNTIME_ERRORS as exc:
+            logger.warning(
+                "CAMERA_OPEN_EXCEPTION camera=%s url=%s error=%s",
+                self.camera_id,
+                redacted,
+                exc,
+            )
             opened = False
 
         if not opened:
-            try:
-                capture.release()
-            except Exception:
-                pass
+            if capture is not None:
+                try:
+                    capture.release()
+                except Exception:
+                    logger.debug("CAMERA_RELEASE_FAILED camera=%s", self.camera_id)
             if initial:
                 logger.error("CAMERA_OPEN_FAILED camera=%s url=%s", self.camera_id, redacted)
                 raise CameraConnectionError(f"Failed to open RTSP camera {self.camera_id}")
@@ -174,6 +194,8 @@ class RTSPCamera(VideoSource):
 
         self._capture = capture
         self._connected = True
+        self._consecutive_read_failures = 0
+        self._drop_decoder_backlog()
         logger.info("CAMERA_CONNECTED camera=%s url=%s", self.camera_id, redacted)
 
     def _create_capture(self, url: str) -> Any:
@@ -190,37 +212,83 @@ class RTSPCamera(VideoSource):
     def _read_frame(self) -> np.ndarray | None:
         capture = self._capture
         if capture is None:
+            self._consecutive_read_failures += 1
             return None
         try:
             ok, frame = capture.read()
-        except Exception as exc:
-            logger.warning("CAMERA_READ_EXCEPTION camera=%s error=%s", self.camera_id, exc)
+        except FRAME_RUNTIME_ERRORS as exc:
+            self._consecutive_read_failures += 1
+            logger.warning(
+                "CAMERA_READ_EXCEPTION camera=%s consecutive=%s error=%s",
+                self.camera_id,
+                self._consecutive_read_failures,
+                exc,
+            )
             return None
         if not ok or frame is None:
+            self._consecutive_read_failures += 1
             return None
         if getattr(frame, "size", 0) == 0:
+            self._consecutive_read_failures += 1
             logger.warning("CAMERA_CORRUPT_FRAME camera=%s", self.camera_id)
             return None
         return frame
 
     def _handle_disconnect(self) -> None:
-        logger.warning("CAMERA_DISCONNECTED camera=%s", self.camera_id)
+        logger.warning(
+            "CAMERA_DISCONNECTED camera=%s consecutive_read_failures=%s",
+            self.camera_id,
+            self._consecutive_read_failures,
+        )
         self._connected = False
         self._release()
-        self._reconnect_count += 1
+        self._consecutive_read_failures = 0
+
+    def _reconnect_delay(self) -> float:
+        base = max(0.01, float(self._config.reconnect_delay))
+        exponent = min(max(0, self._reconnect_count - 1), 8)
+        return min(RECONNECT_BACKOFF_CAP_S, base * (2 ** exponent))
+
+    def _sleep_interruptible(self, seconds: float) -> None:
+        if seconds <= 0:
+            return
+        # Event.wait is interruptible on stop; injected test sleep stays injectable.
+        if self._sleep is time.sleep:
+            self._stop.wait(seconds)
+            return
+        self._sleep(seconds)
+
+    def _drop_decoder_backlog(self) -> None:
+        """Discard buffered decoder frames so the next yield is the newest."""
+        capture = self._capture
+        grab = getattr(capture, "grab", None) if capture is not None else None
+        if not callable(grab):
+            return
+        for _ in range(2):
+            try:
+                if not grab():
+                    break
+            except FRAME_RUNTIME_ERRORS:
+                break
 
     def _reconnect(self) -> None:
-        delay = max(0.1, float(self._config.reconnect_delay))
+        self._reconnect_count += 1
+        delay = self._reconnect_delay()
         logger.warning(
-            "CAMERA_RECONNECTING camera=%s delay_s=%.1f attempt=%s",
+            "CAMERA_RECONNECTING camera=%s delay_s=%.2f attempt=%s",
             self.camera_id,
             delay,
             self._reconnect_count,
         )
-        self._sleep(delay)
+        self._sleep_interruptible(delay)
         if self._stop.is_set():
             return
-        self._open(initial=False)
+        try:
+            self._open(initial=False)
+        except CameraConnectionError as exc:
+            logger.warning("CAMERA_RECONNECT_FAILED camera=%s error=%s", self.camera_id, exc)
+            self._connected = False
+            return
         if self._connected:
             logger.info("CAMERA_RECONNECTED camera=%s reconnects=%s", self.camera_id, self._reconnect_count)
 

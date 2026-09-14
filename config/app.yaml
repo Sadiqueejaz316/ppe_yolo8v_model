@@ -2,7 +2,7 @@ model:
   path: ${MODEL_PATH:-models/best.pt}
   device: ${DEVICE:-auto}
   confidence_threshold: ${CONFIDENCE_THRESHOLD:-0.35}
-  iou_threshold: ${IOU_THRESHOLD:-0.45}
+  iou_threshold: ${IOU_THRESHOLD:-0.5}
   imgsz: 640
 
 inference:
@@ -10,9 +10,13 @@ inference:
 
 tracking:
   enabled: true
-  track_high_thresh: 0.5
+  # Partly occluded workers in a group are detected at 0.36-0.59 confidence.
+  # With high/new at 0.5/0.6 they never started a track, so ~10% of detected
+  # people never reached association, compliance, the overlay or the dashboard.
+  # 0.40 keeps a 0.35-0.40 low band for ByteTrack's occlusion recovery.
+  track_high_thresh: 0.40
   track_low_thresh: 0.1
-  new_track_thresh: 0.6
+  new_track_thresh: 0.40
   # track_buffer: how many frames a lost track stays alive before expiring.
   # At 10 FPS: 40 frames = 4 seconds of occlusion tolerance.
   track_buffer: 40
@@ -28,7 +32,11 @@ association:
   min_containment: 0.25
   center_in_region: true
   min_score: 0.25
-  head_height_ratio: 0.35
+  # Mask/helmet boxes sit at 35-49% of the person box height when the body is
+  # truncated by the frame edge or the worker is close to the camera. At 0.35
+  # they fell just below the head region, scored 0.00, and became UNKNOWN ->
+  # reported missing. 0.45 associates them without stealing PPE from neighbours.
+  head_height_ratio: 0.45
   torso_y_start: 0.20
   torso_y_end: 0.75
   # Relative rank gap that decides Hardhat vs NO-Hardhat (and mask/vest).
@@ -90,8 +98,9 @@ evidence:
   events_jsonl: evidence/events.jsonl
   # Cooldown between repeated evidence captures for the same worker + violation.
   cooldown_seconds: ${EVIDENCE_COOLDOWN_SECONDS:-30}
-  # Allow periodic evidence if a confirmed violation remains active past cooldown.
-  repeat_active_violations: true
+  # One JPEG/event per continuous worker episode. A fully resolved episode may
+  # alert again after cooldown; an uninterrupted violation does not repeat.
+  repeat_active_violations: false
 
 logging:
   level: ${LOG_LEVEL:-INFO}

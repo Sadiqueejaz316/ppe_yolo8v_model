@@ -156,7 +156,7 @@ class EvidenceConfig:
     jpeg_quality: int = 90
     events_jsonl: str = "evidence/events.jsonl"
     cooldown_seconds: float = 30.0
-    repeat_active_violations: bool = True
+    repeat_active_violations: bool = False
 
 
 @dataclass(frozen=True)
@@ -411,7 +411,7 @@ def load_settings(
             ),
             repeat_active_violations=_as_bool(
                 evidence_raw.get("repeat_active_violations", os.environ.get("REPEAT_ACTIVE_VIOLATIONS")),
-                True,
+                False,
             ),
         ),
         logging=LoggingConfig(level=str(logging_raw.get("level") or os.environ.get("LOG_LEVEL") or "INFO")),

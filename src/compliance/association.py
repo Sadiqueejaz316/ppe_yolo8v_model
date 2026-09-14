@@ -98,10 +98,19 @@ def association_score(ppe_bbox: BBox, region: BBox, config: AssociationConfig) -
     iou_score = iou(ppe_bbox, region)
     contain = containment_ratio(ppe_bbox, region)
     center_score = 1.0 if config.center_in_region and point_in_bbox(center(ppe_bbox), region) else 0.0
-    score = max(iou_score, contain, center_score)
     if iou_score < config.min_iou and contain < config.min_containment and center_score <= 0:
         return 0.0
-    return score
+    # Center containment admits borderline PPE boxes, but must not flatten every
+    # overlapping-person candidate to the same perfect score.
+    center_floor = config.min_score if center_score > 0 else 0.0
+    return max(iou_score, contain, center_floor)
+
+
+def _region_distance(ppe_bbox: BBox, region: BBox) -> float:
+    """Pixel center distance used only to break equal association ranks."""
+    px, py = center(ppe_bbox)
+    rx, ry = center(region)
+    return ((px - rx) ** 2 + (py - ry) ** 2) ** 0.5
 
 
 def resolve_ppe_conflict(
@@ -177,7 +186,7 @@ def associate_ppe(
     if not states:
         return states
 
-    candidates: list[tuple[float, int, PPEObservation]] = []
+    candidates: list[tuple[float, float, int, PPEObservation]] = []
     for det in detections:
         hit = taxonomy.ppe_for(det.class_id)
         if hit is None:
@@ -187,6 +196,7 @@ def associate_ppe(
             score = association_score(det.bbox, region, config)
             if score < config.min_score:
                 continue
+            distance = _region_distance(det.bbox, region)
             obs = PPEObservation(
                 canonical=hit.canonical,
                 polarity=hit.polarity,
@@ -195,13 +205,15 @@ def associate_ppe(
                 label=det.label,
                 score=score,
             )
-            candidates.append((score * det.confidence, index, obs))
+            candidates.append((score * det.confidence, distance, index, obs))
 
-    candidates.sort(key=lambda item: item[0], reverse=True)
+    # Overlapping workers produce near-identical scores for the same PPE box;
+    # the closer head/torso region owns it instead of whoever was listed first.
+    candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
     assigned_boxes: set[tuple[float, float, float, float]] = set()
     grouped: dict[int, list[PPEObservation]] = {index: [] for index in range(len(states))}
 
-    for _, person_index, obs in candidates:
+    for _, _, person_index, obs in candidates:
         box_key = tuple(round(v, 2) for v in obs.bbox)
         if box_key in assigned_boxes:
             continue

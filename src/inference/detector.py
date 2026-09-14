@@ -172,12 +172,15 @@ class YOLODetector(Detector):
         self._cuda_fallback_used = False
         label, cuda_status = describe_device(self._device)
         logger.info(
-            "MODEL_LOADED model=%s device=%s device_label=%s cuda=%s classes=%s",
+            "MODEL_LOADED model=%s device=%s device_label=%s cuda=%s classes=%s conf=%.2f iou=%.2f imgsz=%s",
             self._model_path.name,
             self._device,
             label,
             cuda_status,
             len(self._class_names),
+            self._confidence_threshold,
+            self._iou_threshold,
+            self._imgsz,
         )
 
     def _load(self) -> Any:

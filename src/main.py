@@ -21,7 +21,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from src.config.settings import AppConfig, CameraConfig, load_settings
-from src.exceptions import CameraConnectionError, InvalidSourceError, ModelNotFoundError, PPEError
+from src.exceptions import CameraConnectionError, FRAME_RUNTIME_ERRORS, InvalidSourceError, ModelNotFoundError, PPEError
 from src.inference.detector import describe_device, resolve_device
 from src.logging_setup import setup_logging
 from src.metrics.collector import PipelineMetrics
@@ -32,6 +32,9 @@ from src.video.frame_processor import InferenceGate, LatestFrameBuffer
 from src.video.source import VideoSource
 
 logger = logging.getLogger(__name__)
+
+# File-mode only: a stuck decoder on a corrupt file should stop. Live never aborts.
+PROCESS_MAX_CONSECUTIVE_FAILURES = 10
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -196,6 +199,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
             )
         else:
             started_at = time.monotonic()
+            file_failures = 0
             # File videos are often 25/30 FPS. Processing every frame (annotate + live JPEG)
             # on CPU makes the dashboard feel stuck. Sample to target inference FPS and
             # pace wall-clock to source time so playback stays watchable.
@@ -221,7 +225,21 @@ def run_pipeline(args: argparse.Namespace) -> int:
                 infer = True if mode == "image" else gate.allow()
                 if mode == "video":
                     infer = True
-                processed = pipeline.process(frame, infer=infer)
+                try:
+                    processed = pipeline.process(frame, infer=infer)
+                except FRAME_RUNTIME_ERRORS:
+                    file_failures += 1
+                    logger.exception(
+                        "FRAME_PROCESS_FAILED camera=%s frame=%s consecutive=%s",
+                        camera.id,
+                        frame.frame_index,
+                        file_failures,
+                    )
+                    if file_failures >= PROCESS_MAX_CONSECUTIVE_FAILURES:
+                        logger.error("PIPELINE_ABORTED camera=%s reason=repeated_process_failures", camera.id)
+                        break
+                    continue
+                file_failures = 0
                 snapshot = runtime_metrics.snapshot(source)
                 processed.metrics = snapshot
                 _print_metrics_console(snapshot, processed)
@@ -271,6 +289,11 @@ def run_pipeline(args: argparse.Namespace) -> int:
             pipeline.evidence.prune()
         except Exception:
             logger.debug("EVIDENCE_PRUNE_SKIPPED", exc_info=True)
+        if pipeline.dashboard_sink is not None:
+            try:
+                pipeline.dashboard_sink.close()
+            except Exception:
+                logger.debug("DASHBOARD_SINK_CLOSE_FAILED", exc_info=True)
 
     logger.info("PIPELINE_STOPPED camera=%s frames=%s", camera.id, processed_count)
     return 0
@@ -290,61 +313,137 @@ def _run_live(
     stop = threading.Event()
     writer = None
     processed_count = 0
+    ingest_restarts = 0
 
     def _ingest() -> None:
-        try:
-            for frame in source.frames():
+        failures = 0
+        while not stop.is_set():
+            try:
+                for frame in source.frames():
+                    if stop.is_set():
+                        return
+                    buffer.put(frame)
+                    failures = 0
                 if stop.is_set():
-                    break
-                buffer.put(frame)
-        except Exception:
-            logger.exception("INGEST_THREAD_FAILED camera=%s", source.camera_id)
-            stop.set()
+                    return
+                logger.warning(
+                    "INGEST_STREAM_ENDED camera=%s; restarting",
+                    source.camera_id,
+                )
+            except FRAME_RUNTIME_ERRORS as exc:
+                failures += 1
+                logger.warning(
+                    "INGEST_RECOVERABLE camera=%s attempt=%s error_type=%s error=%s",
+                    source.camera_id,
+                    failures,
+                    type(exc).__name__,
+                    exc,
+                )
+            delay = min(5.0, 0.5 * max(1, failures))
+            if stop.wait(delay):
+                return
 
-    thread = threading.Thread(target=_ingest, name="rtsp-ingest", daemon=True)
-    thread.start()
+    def _start_ingest() -> threading.Thread:
+        thread = threading.Thread(target=_ingest, name="rtsp-ingest", daemon=True)
+        thread.start()
+        return thread
+
+    thread = _start_ingest()
     last_log = 0.0
     started_at = time.monotonic()
     try:
         while not stop.is_set():
             if max_seconds and (time.monotonic() - started_at) >= max_seconds:
                 break
-            frame = buffer.take()
+            # Wait to process before taking the slot so a not-yet-due gate
+            # does not discard the newest frame.
+            if not gate.allow(commit=False):
+                if stop.wait(0.005):
+                    break
+                continue
+            frame = buffer.take(timeout=0.05)
             if frame is None:
-                time.sleep(0.005)
+                if stop.is_set():
+                    break
                 if not thread.is_alive():
-                    frame = buffer.take()
-                    if frame is None:
-                        break
+                    leftover = buffer.take(timeout=0)
+                    if leftover is not None:
+                        frame = leftover
+                    else:
+                        ingest_restarts += 1
+                        delay = min(5.0, 0.5 * ingest_restarts)
+                        logger.warning(
+                            "INGEST_THREAD_DIED camera=%s restarts=%s delay_s=%.1f",
+                            source.camera_id,
+                            ingest_restarts,
+                            delay,
+                        )
+                        if stop.wait(delay):
+                            break
+                        thread = _start_ingest()
+                        continue
                 else:
                     continue
-            if not gate.allow():
+            ingest_restarts = 0
+            gate.allow()
+            image = getattr(frame, "image", None)
+            if image is None or getattr(image, "size", 0) == 0:
+                logger.warning(
+                    "FRAME_SKIPPED_EMPTY camera=%s frame=%s",
+                    source.camera_id,
+                    getattr(frame, "frame_index", None),
+                )
                 continue
-            processed = pipeline.process(frame, infer=True)
-            snapshot = runtime_metrics.snapshot(source, dropped_extra=buffer.dropped)
-            processed.metrics = snapshot
-            now = time.monotonic()
-            if now - last_log >= 1.0:
-                _print_metrics_console(snapshot, processed)
-                last_log = now
-            if save_output:
-                if writer is None:
-                    writer = _open_writer(save_output, processed.annotated.shape, max(snapshot.camera_fps, 5.0))
-                if writer is not None:
-                    writer.write(processed.annotated)
-            if display:
-                import cv2
+            try:
+                processed = pipeline.process(frame, infer=True)
+                snapshot = runtime_metrics.snapshot(source, dropped_extra=buffer.dropped)
+                processed.metrics = snapshot
+                now = time.monotonic()
+                if now - last_log >= 1.0:
+                    _print_metrics_console(snapshot, processed)
+                    last_log = now
+            except Exception as exc:
+                logger.exception(
+                    "FRAME_PROCESS_FAILED camera=%s frame=%s error_type=%s error=%s",
+                    source.camera_id,
+                    frame.frame_index,
+                    type(exc).__name__,
+                    exc,
+                )
+                continue
+            try:
+                if save_output:
+                    if writer is None:
+                        writer = _open_writer(
+                            save_output,
+                            processed.annotated.shape,
+                            max(snapshot.camera_fps, 5.0),
+                        )
+                    if writer is not None:
+                        writer.write(processed.annotated)
+                if display:
+                    import cv2
 
-                cv2.imshow(f"PPE {source.camera_id}", processed.annotated)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    break
+                    cv2.imshow(f"PPE {source.camera_id}", processed.annotated)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        break
+            except FRAME_RUNTIME_ERRORS as exc:
+                logger.warning(
+                    "LIVE_OUTPUT_FAILED camera=%s error_type=%s error=%s",
+                    source.camera_id,
+                    type(exc).__name__,
+                    exc,
+                )
             processed_count += 1
             if max_frames and processed_count >= max_frames:
                 break
     finally:
         stop.set()
+        buffer.wake()
         source.stop()
         thread.join(timeout=2.0)
+        if thread.is_alive():
+            logger.warning("INGEST_THREAD_JOIN_TIMEOUT camera=%s", source.camera_id)
         if writer is not None:
             writer.release()
     return processed_count

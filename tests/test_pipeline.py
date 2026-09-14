@@ -116,6 +116,82 @@ def test_stale_inference_does_not_confirm_violation(tmp_path, monkeypatch):
     assert any(event.violation_type == "HELMET_MISSING" for event in confirmed.events)
 
 
+def test_layer_diagnostics_only_at_debug_level(tmp_path, caplog):
+    import logging
+
+    settings = load_settings()
+    settings = replace(
+        settings,
+        evidence=replace(settings.evidence, directory=str(tmp_path / "evidence"), events_jsonl=str(tmp_path / "events.jsonl")),
+        project_root=Path(tmp_path),
+        dashboard=replace(settings.dashboard, sqlite_path=str(tmp_path / "ppe.sqlite"), live_dir=str(tmp_path / "live")),
+    )
+    detector = FakeDetector([_person_all_ppe(), _person_all_ppe()])
+    pipeline = PPEPipeline.build(settings, settings.cameras[0], detector=detector)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    with caplog.at_level(logging.INFO, logger="src.pipeline"):
+        pipeline.process(_frame(start, 1), infer=True)
+    assert "PIPELINE_LAYERS" not in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="src.pipeline"):
+        pipeline.process(_frame(start + timedelta(seconds=1), 2), infer=True)
+    diag = [line for line in caplog.text.splitlines() if "PIPELINE_LAYERS" in line]
+    assert len(diag) == 1
+    assert "persons=1" in diag[0]
+    assert "tracks=1" in diag[0]
+    assert "ppe=3" in diag[0]
+    assert "untracked=0" in diag[0]
+
+
+def test_deployed_config_admits_partly_occluded_workers():
+    """Crowded-scene workers are detected at 0.36-0.59; they must start tracks."""
+    settings = load_settings()
+    assert settings.tracking.new_track_thresh <= 0.45
+    assert settings.tracking.track_high_thresh <= 0.45
+    assert settings.tracking.track_low_thresh < settings.tracking.track_high_thresh
+    assert settings.association.head_height_ratio >= 0.45
+
+
+def test_pipeline_annotates_once_when_no_event(tmp_path, monkeypatch):
+    settings = load_settings()
+    settings = replace(
+        settings,
+        evidence=replace(
+            settings.evidence,
+            directory=str(tmp_path / "evidence"),
+            events_jsonl=str(tmp_path / "events.jsonl"),
+        ),
+        project_root=Path(tmp_path),
+        dashboard=replace(
+            settings.dashboard,
+            sqlite_path=str(tmp_path / "ppe.sqlite"),
+            live_dir=str(tmp_path / "live"),
+        ),
+    )
+    pipeline = PPEPipeline.build(
+        settings,
+        settings.cameras[0],
+        detector=FakeDetector([_person_all_ppe()]),
+    )
+    calls = 0
+
+    from src import pipeline as pipeline_module
+
+    original_annotate = pipeline_module.annotate
+
+    def counted_annotate(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_annotate(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "annotate", counted_annotate)
+    pipeline.process(_frame(datetime(2026, 1, 1, tzinfo=timezone.utc)), infer=True)
+
+    assert calls == 1
+
+
 def test_pipeline_emits_evidence_for_confirmed_event(tmp_path):
     settings = load_settings()
     settings = replace(
@@ -189,6 +265,48 @@ def test_pipeline_flicker_compliant_does_not_recapture(tmp_path):
     assert later.events == []
     assert later2.events == []
     assert len(list((tmp_path / "evidence").rglob("*.jpg"))) == 1
+
+
+def test_continuous_violation_does_not_repeat_after_cooldown(tmp_path):
+    settings = load_settings()
+    settings = replace(
+        settings,
+        evidence=replace(
+            settings.evidence,
+            directory=str(tmp_path / "evidence"),
+            events_jsonl=str(tmp_path / "events.jsonl"),
+            repeat_active_violations=False,
+        ),
+        violations=replace(
+            settings.violations,
+            confirmation_seconds=1.0,
+            cooldown_seconds=30.0,
+        ),
+        visualization=replace(settings.visualization, stable_frames=1),
+        project_root=Path(tmp_path),
+        dashboard=replace(
+            settings.dashboard,
+            sqlite_path=str(tmp_path / "ppe.sqlite"),
+            live_dir=str(tmp_path / "live"),
+        ),
+    )
+    detector = FakeDetector(
+        [_person_missing_helmet(), _person_missing_helmet(), _person_missing_helmet()]
+    )
+    pipeline = PPEPipeline.build(settings, settings.cameras[0], detector=detector)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    pipeline.process(_frame(start, 1), infer=True)
+    first = pipeline.process(_frame(start + timedelta(seconds=1), 2), infer=True)
+    after_cooldown = pipeline.process(
+        _frame(start + timedelta(seconds=31), 3),
+        infer=True,
+    )
+
+    assert len(first.events) == 1
+    assert after_cooldown.events == []
+    assert len(list((tmp_path / "evidence").rglob("*.jpg"))) == 1
+    assert len((tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()) == 1
 
 
 def test_pipeline_scene_summary_is_person_centric(tmp_path):

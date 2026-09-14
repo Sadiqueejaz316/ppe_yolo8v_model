@@ -64,6 +64,49 @@ def test_overlapping_workers_get_nearest_helmet():
     assert assigned[0] in {1, 2}
 
 
+def test_overlapping_large_person_does_not_steal_nearer_workers_helmet():
+    taxonomy = _taxonomy()
+    persons = [
+        _person(1, (80, 0, 140, 200)),
+        _person(2, (0, 0, 240, 400)),
+    ]
+    detections = [Detection(0, "Hardhat", 0.91, (95, 10, 115, 35))]
+
+    states = associate_ppe(
+        persons,
+        detections,
+        taxonomy,
+        AssociationConfig(head_height_ratio=0.45),
+    )
+    by_id = {item.person_id: item for item in states}
+
+    assert by_id[1].status_for("helmet") == "present"
+    assert by_id[2].status_for("helmet") == "not_associated"
+
+
+def test_mask_just_below_short_head_region_still_associates():
+    """Truncated/close person boxes put the face at ~40% of the box height."""
+    taxonomy = _taxonomy()
+    persons = [_person(1, (0, 0, 300, 360))]
+    # Hardhat at 33-47% of the person box: outside a 35% head region.
+    detections = [Detection(0, "Hardhat", 0.7, (120, 120, 190, 170))]
+    states = associate_ppe(persons, detections, taxonomy, AssociationConfig(head_height_ratio=0.45))
+    assert states[0].status_for("helmet") == "present"
+
+
+def test_close_workers_each_keep_their_own_helmet():
+    taxonomy = _taxonomy()
+    persons = [_person(1, (0, 0, 120, 200)), _person(2, (70, 0, 190, 200))]
+    detections = [
+        Detection(0, "Hardhat", 0.90, (20, 8, 50, 40)),
+        Detection(0, "Hardhat", 0.88, (140, 8, 170, 40)),
+    ]
+    states = associate_ppe(persons, detections, taxonomy, AssociationConfig())
+    by_id = {item.person_id: item for item in states}
+    assert by_id[1].observations["helmet"].bbox == (20, 8, 50, 40)
+    assert by_id[2].observations["helmet"].bbox == (140, 8, 170, 40)
+
+
 def _full_taxonomy():
     names = {
         0: "Hardhat",
