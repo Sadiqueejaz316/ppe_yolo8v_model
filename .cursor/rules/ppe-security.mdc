@@ -1,0 +1,22 @@
+---
+description: RTSP secrets, log redaction, evidence path safety, and no worker identity.
+globs: src/**/*.py,config/**/*.yaml,.env.example,src/api/**/*.py
+alwaysApply: false
+---
+
+# Security
+
+```python
+# ❌ BAD
+logger.info("Connecting %s", camera.rtsp_url)
+
+# ✅ GOOD
+from src.security import redact_rtsp_url
+logger.info("CAMERA_OPEN_FAILED camera=%s url=%s", camera.id, redact_rtsp_url(url))
+```
+
+- Real RTSP credentials live in `.env` (gitignored). YAML may reference `${RTSP_URL}` only. Never commit `.env`.
+- Dashboard camera payloads omit `rtsp_url`. Do not add it to `CameraRow` or React types.
+- Evidence: `resolve_evidence_file()` must stay inside the evidence root. Do not serve arbitrary paths.
+- No biometric ID, face crops for recognition, or mapping track IDs to employees.
+- V1 has no login — do not expose the dashboard beyond localhost without calling that out. Do not add auth unless asked.

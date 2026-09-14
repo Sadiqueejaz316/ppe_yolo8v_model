@@ -28,8 +28,18 @@ evidence/CAM-001/
 runs/
 output/
 outputs/
+data/*.sqlite
+data/live/
 *.avi
 *.mp4
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Documentation drafts (keep the dashboard spec)
+docs/*
+!docs/THIN_DASHBOARD.md
 
 # Test images and temporary test files
 test_images/
@@ -46,9 +56,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
-
-# Documentation
-docs/
 
 # Temporary
 _tmp_*.py

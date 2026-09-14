@@ -1,0 +1,17 @@
+---
+description: Python conventions for the PPE pipeline — interfaces, dataclasses, taxonomy, logging.
+globs: src/**/*.py
+alwaysApply: false
+---
+
+# Python pipeline code
+
+- `from __future__ import annotations`. Prefer frozen dataclasses for records (`Detection`, `PPEViolationEvent`, config).
+- Replace backends behind ABCs in `src/inference/detector.py`, `src/tracking/tracker.py`, `src/video/source.py`, `src/events/publisher.py`.
+- Normalize detector output to `Detection` (`bbox` is pixel xyxy). Do not leak Ultralytics/torch types past `src/inference/`.
+- Read class names from the loaded checkpoint. Map via `src/taxonomy.py` + `class_taxonomy` aliases. Do not hard-code class IDs.
+- Helmet/mask associate to the **head** region; vest to **torso**. One PPE box → at most one person.
+- Config: YAML in `config/` + `${ENV:-default}` expansion in `src/config/settings.py`. Secrets only in `.env`.
+- Logs: `EVENT_CODE key=value`. Redact RTSP with `redact_rtsp_url()` before any print/log.
+- Domain errors inherit `PPEError` (`src/exceptions.py`).
+- Dashboard I/O lives in `src/ops/` and `src/api/`. Do not re-run association or zone rules there.

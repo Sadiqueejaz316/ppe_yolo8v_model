@@ -1,0 +1,18 @@
+---
+description: Thin operator dashboard — React and FastAPI present pipeline outputs; they never compute PPE compliance.
+globs: frontend/**/*.ts,frontend/**/*.tsx,frontend/**/*.css,src/api/**/*.py,src/ops/**/*.py
+alwaysApply: false
+---
+
+# Operator dashboard
+
+The UI is a presentation layer. Detection, tracking, association, and compliance stay in the Python pipeline.
+
+- Contract: `ProcessedFrame.scene_summary` + confirmed `PPEViolationEvent`. API must not re-run association or zone rules. React must not derive helmet/mask/vest/overall from raw boxes.
+- Live view is JPEG polling (`data/live/{camera_id}.jpg` or in-memory buffer), not RTSP in the browser. Poll via `usePoll` / `dashboard.poll_interval_ms`.
+- Routes: `/dashboard`, `/events`, `/events/:id`, `/cameras`. Vite proxies `/api` → `http://127.0.0.1:8000`.
+- Never return `rtsp_url` or passwords. Validate ids with `is_safe_camera_id` / `is_safe_event_id`. Evidence by event id with path-traversal checks (`src/api/paths.py`).
+- `MOCK_DATA=true` must stay labeled **DEVELOPMENT MODE — live counts are simulated**. Mock events have no evidence files.
+- CORS stays local dashboard origins; methods GET-only unless a new write API is explicitly requested.
+- Styling: reuse CSS variables in `frontend/src/index.css` (`--safe`, `--attention`, `--warn`, `--panel`). Control-room dark UI, high contrast. Do not introduce a new design system.
+- SQLite (`data/ppe.sqlite`) stores event metadata only. No image blobs, no one-row-per-frame.

@@ -196,8 +196,31 @@ def run_pipeline(args: argparse.Namespace) -> int:
             )
         else:
             started_at = time.monotonic()
+            # File videos are often 25/30 FPS. Processing every frame (annotate + live JPEG)
+            # on CPU makes the dashboard feel stuck. Sample to target inference FPS and
+            # pace wall-clock to source time so playback stays watchable.
+            source_fps = float(getattr(source, "measured_fps", 0.0) or 0.0)
+            if source_fps <= 1e-3:
+                source_fps = float(gate_fps)
+            stride = 1
+            pace_interval = 0.0
+            if mode == "video":
+                stride = max(1, int(round(source_fps / max(float(gate_fps), 0.1))))
+                pace_interval = stride / source_fps
+                logger.info(
+                    "VIDEO_SAMPLE camera=%s source_fps=%.1f target_fps=%.1f stride=%s",
+                    camera.id,
+                    source_fps,
+                    gate_fps,
+                    stride,
+                )
             for frame in source.frames():
+                if mode == "video" and (frame.frame_index - 1) % stride != 0:
+                    continue
+                tick_started = time.monotonic()
                 infer = True if mode == "image" else gate.allow()
+                if mode == "video":
+                    infer = True
                 processed = pipeline.process(frame, infer=infer)
                 snapshot = runtime_metrics.snapshot(source)
                 processed.metrics = snapshot
@@ -227,6 +250,10 @@ def run_pipeline(args: argparse.Namespace) -> int:
                     break
                 if args.max_seconds and (time.monotonic() - started_at) >= args.max_seconds:
                     break
+                if pace_interval > 0:
+                    remaining = pace_interval - (time.monotonic() - tick_started)
+                    if remaining > 0:
+                        time.sleep(remaining)
     except KeyboardInterrupt:
         logger.info("SHUTDOWN_REQUESTED camera=%s", camera.id)
     finally:
@@ -291,8 +318,9 @@ def _run_live(
                         break
                 else:
                     continue
-            infer = gate.allow()
-            processed = pipeline.process(frame, infer=infer)
+            if not gate.allow():
+                continue
+            processed = pipeline.process(frame, infer=True)
             snapshot = runtime_metrics.snapshot(source, dropped_extra=buffer.dropped)
             processed.metrics = snapshot
             now = time.monotonic()

@@ -65,6 +65,19 @@ def _frame(ts: datetime, index: int = 1) -> VideoFrame:
     )
 
 
+def _person_all_ppe() -> list[Detection]:
+    return [
+        Detection(5, "Person", 0.9, (10, 10, 50, 70)),
+        Detection(0, "Hardhat", 0.9, (18, 10, 38, 22)),
+        Detection(7, "Safety Vest", 0.88, (14, 28, 46, 60)),
+        Detection(1, "Mask", 0.86, (24, 18, 36, 28)),
+    ]
+
+
+def _person_missing_all() -> list[Detection]:
+    return [Detection(5, "Person", 0.9, (10, 10, 50, 70))]
+
+
 def _person_missing_helmet() -> list[Detection]:
     return [
         Detection(5, "Person", 0.9, (10, 10, 50, 70)),
@@ -120,6 +133,62 @@ def test_pipeline_emits_evidence_for_confirmed_event(tmp_path):
     assert result.events
     assert result.events[0].evidence_path
     assert Path(result.events[0].evidence_path).exists()
+
+
+def test_pipeline_one_event_for_multiple_missing_ppe(tmp_path):
+    settings = load_settings()
+    settings = replace(
+        settings,
+        evidence=replace(settings.evidence, directory=str(tmp_path / "evidence"), events_jsonl=str(tmp_path / "events.jsonl")),
+        violations=replace(settings.violations, confirmation_seconds=1.0, cooldown_seconds=30.0),
+        visualization=replace(settings.visualization, stable_frames=1),
+        project_root=Path(tmp_path),
+        dashboard=replace(settings.dashboard, sqlite_path=str(tmp_path / "ppe.sqlite"), live_dir=str(tmp_path / "live")),
+    )
+    detector = FakeDetector([_person_missing_all(), _person_missing_all()])
+    pipeline = PPEPipeline.build(settings, settings.cameras[0], detector=detector)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    pipeline.process(_frame(start, 1), infer=True)
+    result = pipeline.process(_frame(start + timedelta(seconds=1), 2), infer=True)
+    assert len(result.events) == 1
+    assert result.events[0].evidence_path
+    jpgs = list((tmp_path / "evidence").rglob("*.jpg"))
+    assert len(jpgs) == 1
+    jsonl = Path(tmp_path / "events.jsonl")
+    assert jsonl.exists()
+    assert len(jsonl.read_text(encoding="utf-8").strip().splitlines()) == 1
+
+
+def test_pipeline_flicker_compliant_does_not_recapture(tmp_path):
+    settings = load_settings()
+    settings = replace(
+        settings,
+        evidence=replace(settings.evidence, directory=str(tmp_path / "evidence"), events_jsonl=str(tmp_path / "events.jsonl")),
+        violations=replace(settings.violations, confirmation_seconds=1.0, cooldown_seconds=0.0),
+        visualization=replace(settings.visualization, stable_frames=1),
+        project_root=Path(tmp_path),
+        dashboard=replace(settings.dashboard, sqlite_path=str(tmp_path / "ppe.sqlite"), live_dir=str(tmp_path / "live")),
+    )
+    detector = FakeDetector(
+        [
+            _person_missing_helmet(),
+            _person_missing_helmet(),
+            _person_all_ppe(),
+            _person_missing_helmet(),
+            _person_missing_helmet(),
+        ]
+    )
+    pipeline = PPEPipeline.build(settings, settings.cameras[0], detector=detector)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    pipeline.process(_frame(start, 1), infer=True)
+    confirmed = pipeline.process(_frame(start + timedelta(seconds=1), 2), infer=True)
+    assert len(confirmed.events) == 1
+    pipeline.process(_frame(start + timedelta(seconds=2), 3), infer=True)
+    later = pipeline.process(_frame(start + timedelta(seconds=6), 4), infer=True)
+    later2 = pipeline.process(_frame(start + timedelta(seconds=7), 5), infer=True)
+    assert later.events == []
+    assert later2.events == []
+    assert len(list((tmp_path / "evidence").rglob("*.jpg"))) == 1
 
 
 def test_pipeline_scene_summary_is_person_centric(tmp_path):

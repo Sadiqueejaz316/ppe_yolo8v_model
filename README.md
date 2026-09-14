@@ -59,8 +59,11 @@ src/
   events/violation.py         PPEViolationEvent
   evidence/capture.py         Save annotated frames for confirmed events only
   pipeline.py                 End-to-end per-frame orchestration
+  ops/sink.py                 Optional dashboard adapter (scene_summary + events → SQLite/live JPEG)
+  api/app.py                  Thin FastAPI operator API
   viz.py                      Person-centric overlay (raw boxes only in debug)
   main.py                     image / video / rtsp entry point
+frontend/                     React operator dashboard (Vite)
 ```
 
 Interfaces intended for later replacement:
@@ -72,7 +75,7 @@ Interfaces intended for later replacement:
 | `Tracker` | `ByteTracker` | BoT-SORT, OC-SORT |
 | `EventPublisher` | `LocalEventPublisher` (log + JSONL) | HTTP, Redis, Kafka |
 
-V1 does **not** include FastAPI, React, PostgreSQL, Redis, Kafka, Kubernetes, face recognition, or model retraining.
+V1 now includes a **thin local FastAPI + React operator dashboard**. It still does **not** include PostgreSQL, Redis, Kafka, Kubernetes, face recognition, or model retraining.
 
 ## 3. Requirements
 
@@ -378,9 +381,28 @@ visualization:
 
 Override from the CLI: `--viz-mode debug`.
 
-`ProcessedFrame.scene_summary` is the data interface for a future side panel / dashboard (`total_people`, `compliant`, `violations`, per-person helmet/mask/vest/overall_status). V1 does not add a separate frontend.
+`ProcessedFrame.scene_summary` is the dashboard contract. See [docs/THIN_DASHBOARD.md](docs/THIN_DASHBOARD.md).
 
-`visualization.stable_frames` holds helmet/mask/vest polarity until that many consecutive frames agree, so the overlay does not flash `NO HELMET` / `HELMET` on a noisy pair of frames. Violation **events** still use `violations.confirmation_seconds`.
+## Operator dashboard
+
+The UI is a presentation layer. Detection, tracking, association, and compliance stay in the Python pipeline.
+
+```bash
+# Backend API (http://127.0.0.1:8000)
+python -m src.api
+
+# Simulated live counts (labeled DEVELOPMENT MODE)
+MOCK_DATA=true python -m src.api
+
+# Frontend (http://127.0.0.1:5173)
+cd frontend
+npm install
+npm run dev
+```
+
+Pages: `/dashboard`, `/events`, `/events/:id`, `/cameras`.
+
+Live browser video is a JPEG snapshot written by the pipeline (`data/live/{camera_id}.jpg`), not RTSP-in-the-browser.
 
 ## 15. Testing
 
@@ -398,6 +420,7 @@ Coverage includes:
 - all PPE present → compliant; helmet missing → violation
 - one bad frame → no event; persistent miss → one event; cooldown → still one event
 - overlay flicker hold; person-centric vs debug visualization
+- operator dashboard API (health, summary, cameras, events, evidence)
 - evidence write path
 
 Tests mock cameras and frames. Association, compliance, and visualization tests use synthetic `Detection` objects and do **not** load `best.pt`. A physical RTSP camera is not required.
@@ -415,7 +438,9 @@ Tests mock cameras and frames. Association, compliance, and visualization tests 
 | Every frame is a violation | Increase `VIOLATION_CONFIRMATION_SECONDS`. Check the person-centric overlay before trusting events. |
 | Cluttered overlay / six boxes per person | Production mode is `person_summary`. Use `--viz-mode debug` only when inspecting raw YOLO output. |
 | Duplicate alerts | Increase `VIOLATION_COOLDOWN_SECONDS`. |
-| Wrong PPE mapping | Print classes with `python -m src.inference.test_model` and edit `class_taxonomy`. |
+| Dashboard API fails | Install `fastapi`/`uvicorn` (`pip install -r requirements.txt`). Run `python -m src.api`. |
+| Empty dashboard counts | Run the pipeline so it writes `data/live`, or use `MOCK_DATA=true` (labeled development). |
+| No live camera image | Expected until the pipeline publishes JPEG snapshots. Browser RTSP is not in V1. |
 
 ## Commands cheat sheet
 
@@ -433,6 +458,10 @@ python -m src.main --mode video --source test_images/test.mp4 --no-display
 # RTSP
 python -m src.main --mode rtsp --camera CAM-001
 
+# Dashboard
+python -m src.api
+# then: cd frontend && npm install && npm run dev
+
 # Tests
 python -m pytest tests -q
 ```
@@ -442,4 +471,7 @@ python -m pytest tests -q
 - RTSP credentials come from the environment / `.env`
 - `.env` is gitignored
 - logs call `redact_rtsp_url()` before printing stream locations
+- dashboard APIs never return `rtsp_url` or passwords
+- evidence is served by event id with path-traversal checks
 - no employee identity, no face recognition, tracking IDs are temporary
+- V1 dashboard has no login (add before production exposure)

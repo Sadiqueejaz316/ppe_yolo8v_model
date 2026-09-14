@@ -23,6 +23,7 @@ from src.exceptions import EvidenceError, InferenceError
 from src.inference.detector import Detector, YOLODetector
 from src.inference.result import Detection, DetectionResult
 from src.metrics.collector import MetricsSnapshot, PipelineMetrics
+from src.ops.sink import DashboardSink
 from src.taxonomy import ResolvedTaxonomy, resolve_taxonomy
 from src.tracking.tracker import ByteTracker, NoOpTracker, TrackedDetection, Tracker
 from src.video.source import VideoFrame
@@ -59,6 +60,7 @@ class PPEPipeline:
     evidence: EvidenceCapture
     publisher: EventPublisher
     metrics: PipelineMetrics
+    dashboard_sink: DashboardSink | None = None
     last_detections: list[Detection] = field(default_factory=list)
     last_result: DetectionResult | None = None
 
@@ -93,6 +95,11 @@ class PPEPipeline:
             else:
                 tracker = NoOpTracker()
         jsonl = config.resolve_path(config.evidence.events_jsonl)
+        sink: DashboardSink | None = None
+        try:
+            sink = DashboardSink.from_config(config)
+        except Exception:
+            logger.warning("DASHBOARD_SINK_INIT_FAILED camera=%s", camera.id, exc_info=True)
         pipeline = cls(
             config=config,
             camera=camera,
@@ -105,6 +112,7 @@ class PPEPipeline:
             evidence=EvidenceCapture(config.evidence, config.project_root),
             publisher=LocalEventPublisher(jsonl),
             metrics=PipelineMetrics(camera.id),
+            dashboard_sink=sink,
         )
         if hasattr(det, "warmup"):
             try:
@@ -157,22 +165,43 @@ class PPEPipeline:
             timestamp=frame.timestamp,
             visualization=self.config.visualization,
         )
+        # Only clear the episode when the worker is fully compliant. Per-item
+        # PRESENT flicker must not reopen evidence inside the cooldown window.
+        for comp in compliance:
+            if comp.compliant:
+                self.evidence.deduplicator.resolve_violation(frame.camera_id, comp.person_id, comp.present_ppe)
+
+        # Group confirmed events by person for multi-item consolidation
+        events_by_person: dict[int, list[PPEViolationEvent]] = {}
         for event in events:
-            evidence_path = None
+            events_by_person.setdefault(event.person_id, []).append(event)
+
+        for _person_id, person_events in events_by_person.items():
+            signature_items = [ev.violation_type for ev in person_events]
+            primary_event = person_events[0]
+            saved = None
             try:
-                evidence_path = self.evidence.save(annotated_preview, event)
+                saved = self.evidence.save(
+                    annotated_preview,
+                    primary_event,
+                    signature=signature_items,
+                )
             except EvidenceError:
-                logger.exception("EVIDENCE_EXCEPTION camera=%s event=%s", frame.camera_id, event.event_id)
+                logger.exception("EVIDENCE_EXCEPTION camera=%s event=%s", frame.camera_id, primary_event.event_id)
+
+            if saved is None or not saved.is_new:
+                continue
+
             event = PPEViolationEvent(
-                event_id=event.event_id,
-                camera_id=event.camera_id,
-                timestamp=event.timestamp,
-                person_id=event.person_id,
-                violation_type=event.violation_type,
-                confidence=event.confidence,
-                evidence_path=evidence_path,
-                zone=event.zone,
-                bbox=event.bbox,
+                event_id=primary_event.event_id,
+                camera_id=primary_event.camera_id,
+                timestamp=primary_event.timestamp,
+                person_id=primary_event.person_id,
+                violation_type=primary_event.violation_type,
+                confidence=primary_event.confidence,
+                evidence_path=saved.path,
+                zone=primary_event.zone,
+                bbox=primary_event.bbox,
             )
             try:
                 self.publisher.publish(event)
@@ -208,7 +237,7 @@ class PPEPipeline:
             timestamp=frame.timestamp,
             visualization=self.config.visualization,
         )
-        return ProcessedFrame(
+        result = ProcessedFrame(
             frame=frame,
             detections=detections,
             persons=persons,
@@ -221,3 +250,10 @@ class PPEPipeline:
             metrics=snapshot,
             scene_summary=summary,
         )
+        # Live JPEG encode + disk write is expensive; only publish fresh inference frames.
+        if self.dashboard_sink is not None and fresh_inference:
+            try:
+                self.dashboard_sink.observe(result)
+            except Exception:
+                logger.exception("DASHBOARD_SINK_FAILED camera=%s", frame.camera_id)
+        return result

@@ -6,15 +6,21 @@ model:
   imgsz: 640
 
 inference:
-  target_inference_fps: ${TARGET_FPS:-20}
+  target_inference_fps: ${TARGET_FPS:-10}
 
 tracking:
   enabled: true
   track_high_thresh: 0.5
   track_low_thresh: 0.1
   new_track_thresh: 0.6
-  track_buffer: 30
-  match_thresh: 0.7
+  # track_buffer: how many frames a lost track stays alive before expiring.
+  # At 10 FPS: 40 frames = 4 seconds of occlusion tolerance.
+  track_buffer: 40
+  # match_thresh: minimum IoU to link a detection to an existing track.
+  # ROOT CAUSE FIX: default 0.7 causes ID switches when a person moves ~20px
+  # on a 100px-wide box (IoU=0.667 < 0.7 -> no match -> new ID).
+  # 0.35 is stable for movement up to ~50px between frames at 10 FPS.
+  match_thresh: 0.35
   min_hits: 1
 
 association:
@@ -71,10 +77,10 @@ zones:
     required_ppe:
       - helmet
       - safety_vest
-      #- mask
+      - mask
 
 violations:
-  confirmation_seconds: ${VIOLATION_CONFIRMATION_SECONDS:-5}
+  confirmation_seconds: ${VIOLATION_CONFIRMATION_SECONDS:-3}
   cooldown_seconds: ${VIOLATION_COOLDOWN_SECONDS:-30}
 
 evidence:
@@ -82,6 +88,21 @@ evidence:
   retention_days: 30
   jpeg_quality: 90
   events_jsonl: evidence/events.jsonl
+  # Cooldown between repeated evidence captures for the same worker + violation.
+  cooldown_seconds: ${EVIDENCE_COOLDOWN_SECONDS:-30}
+  # Allow periodic evidence if a confirmed violation remains active past cooldown.
+  repeat_active_violations: true
 
 logging:
   level: ${LOG_LEVEL:-INFO}
+
+dashboard:
+  sqlite_path: data/ppe.sqlite
+  live_dir: data/live
+  # Browser live view is JPEG polling (not RTSP). Keep this ≤500ms for smoother UI.
+  poll_interval_ms: ${DASHBOARD_POLL_MS:-500}
+  # Non-blocking in-memory snapshot refresh rate (~8 FPS)
+  snapshot_poll_interval_ms: ${SNAPSHOT_POLL_MS:-120}
+  mock_data: false
+  host: ${DASHBOARD_HOST:-127.0.0.1}
+  port: ${DASHBOARD_PORT:-8000}

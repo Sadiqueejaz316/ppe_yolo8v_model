@@ -22,8 +22,8 @@ def test_evidence_written_only_when_save_called(tmp_path):
     )
     frame = np.zeros((20, 20, 3), dtype=np.uint8)
     path = capture.save(frame, event)
-    assert path is not None
-    saved = Path(path)
+    assert path.path is not None
+    saved = Path(path.path)
     assert saved.exists()
     assert "CAM-001" in str(saved)
     assert "2026-08-21" in str(saved)
@@ -41,15 +41,15 @@ def test_evidence_filenames_are_unique(tmp_path):
             PPEViolationEvent.create(
                 camera_id="CAM-001", timestamp=stamp, person_id=1, missing_ppe="helmet", confidence=0.9
             ),
-        )
+        ).path
     )
     second = Path(
         capture.save(
             frame,
             PPEViolationEvent.create(
-                camera_id="CAM-001", timestamp=stamp, person_id=1, missing_ppe="mask", confidence=0.9
+                camera_id="CAM-001", timestamp=stamp, person_id=2, missing_ppe="mask", confidence=0.9
             ),
-        )
+        ).path
     )
     assert first.exists() and second.exists()
     assert first.name != second.name
