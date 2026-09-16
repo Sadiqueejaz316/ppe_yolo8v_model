@@ -87,7 +87,20 @@ V1 now includes a **thin local FastAPI + React operator dashboard**. It still do
 
 ## 4. Installation
 
-The existing virtualenv was created in WSL:
+### Quickstart (Automated Setup)
+
+Run the automated onboarding script to initialize the virtualenv, install dependencies, copy environment defaults, create runtime directories, and fetch the model checkpoint:
+
+```bash
+./scripts/setup.sh
+```
+
+Flags available:
+- `./scripts/setup.sh --skip-frontend`: Install only backend/Python dependencies.
+- `./scripts/setup.sh --run-tests`: Run test suite verification automatically.
+- `./scripts/setup.sh --help`: View all available options.
+
+### Manual Setup
 
 ```bash
 cd /mnt/d/Tata-ppe   # or D:\Tata-ppe from Windows
