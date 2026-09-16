@@ -48,3 +48,5 @@ ultralytics==8.4.125
 ultralytics-platform==0.1.8
 ultralytics-thop==2.1.6
 urllib3==2.7.0
+fastapi==0.116.1
+uvicorn==0.35.0

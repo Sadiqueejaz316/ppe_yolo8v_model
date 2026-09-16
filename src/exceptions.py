@@ -35,3 +35,27 @@ class InferenceError(PPEError):
 
 class EvidenceError(PPEError):
     """Evidence could not be written (disk, permissions, etc.)."""
+
+
+def _opencv_error_types() -> tuple[type[BaseException], ...]:
+    try:
+        import cv2
+    except ImportError:
+        return ()
+    err = getattr(cv2, "error", None)
+    if isinstance(err, type) and issubclass(err, BaseException):
+        return (err,)
+    return ()
+
+
+# Recoverable per-frame failures. The live loop must log these and continue.
+# Do not add a blanket Exception here — programming bugs should still surface.
+FRAME_RUNTIME_ERRORS: tuple[type[BaseException], ...] = (
+    InferenceError,
+    EvidenceError,
+    CameraError,
+    OSError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+) + _opencv_error_types()

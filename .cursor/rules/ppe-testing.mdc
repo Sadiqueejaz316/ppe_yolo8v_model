@@ -1,0 +1,18 @@
+---
+description: Pytest conventions — synthetic Detection objects, no best.pt, no physical RTSP camera.
+globs: tests/**/*.py
+alwaysApply: false
+---
+
+# Tests
+
+```bash
+python -m pytest tests -q
+```
+
+- Association, compliance, temporal, viz, and most pipeline tests use synthetic `Detection` / `TrackedDetection` objects. They must **not** load `models/best.pt`.
+- Mock cameras and frames. A physical RTSP camera is not required.
+- `tests/test_model_load.py` / `python -m src.inference.test_model` are the checkpoint checks. Skip or fail clearly if the file is absent; do not download a different model.
+- Cover the real failure modes: helmet on the wrong person, overlapping workers, Hardhat vs NO-Hardhat, one bad frame → no event, persist → one event, cooldown → still one event, overlay flicker hold.
+- Dashboard tests mock `scene_summary` and events. Do not reimplement compliance in assertions of API payload shape.
+- Prefer the existing helpers in `tests/test_association.py` (`_taxonomy()`, `_person()`) over new fixtures unless reuse is obvious.

@@ -1,0 +1,25 @@
+---
+description: Core PPE architecture — detection is not compliance; V1 stays a person-centric vision pipeline plus a thin dashboard.
+alwaysApply: true
+---
+
+# PPE system invariants
+
+Mandatory chain (do not skip or invert):
+
+`ingest → detect → track persons → associate PPE to a person → PersonPPEState → display hold → zone compliance → temporal confirm → event + evidence`
+
+- A `Hardhat` box in the frame does **not** mean that worker is wearing a helmet. Association and compliance are separate modules.
+- Canonical PPE types: `helmet`, `mask`, `safety_vest`. Collapse Hardhat/NO-Hardhat (and mask/vest pairs) to one `PRESENT` / `MISSING` / `UNKNOWN` per person.
+- Overlay and dashboard draw **people**, not every raw YOLO class. Production viz is `person_summary` or `minimal`; `debug` only for model inspection.
+- Safety rule: a required item that is not **positively** associated is missing.
+- One bad frame must not emit an event. Confirm only on **fresh inference** (`PPEPipeline.process`).
+- Track IDs are temporary. No face recognition, no employee identity.
+
+## V1 scope (do not add unless asked)
+
+No PostgreSQL, Redis, Kafka, Kubernetes, model retraining, browser RTSP/WebRTC, or auth/RBAC.
+
+Do not replace `models/best.pt`. Map new class strings in `config/app.yaml` `class_taxonomy`.
+
+Interfaces stay swappable: `VideoSource`, `Detector`, `Tracker`, `EventPublisher`. Downstream code consumes `Detection` (xyxy), never Ultralytics types.

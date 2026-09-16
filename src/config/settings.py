@@ -155,11 +155,26 @@ class EvidenceConfig:
     retention_days: int = 30
     jpeg_quality: int = 90
     events_jsonl: str = "evidence/events.jsonl"
+    cooldown_seconds: float = 30.0
+    repeat_active_violations: bool = False
 
 
 @dataclass(frozen=True)
 class LoggingConfig:
     level: str = "INFO"
+
+
+@dataclass(frozen=True)
+class DashboardConfig:
+    """Thin operator UI. Does not change detection or compliance."""
+
+    sqlite_path: str = "data/ppe.sqlite"
+    live_dir: str = "data/live"
+    poll_interval_ms: int = 500
+    snapshot_poll_interval_ms: int = 120
+    mock_data: bool = False
+    host: str = "127.0.0.1"
+    port: int = 8000
 
 
 @dataclass(frozen=True)
@@ -189,6 +204,7 @@ class AppConfig:
     violations: ViolationConfig
     evidence: EvidenceConfig
     logging: LoggingConfig
+    dashboard: DashboardConfig
     cameras: tuple[CameraConfig, ...]
     project_root: Path = PROJECT_ROOT
 
@@ -274,6 +290,22 @@ def _parse_visualization(raw: dict[str, Any]) -> VisualizationConfig:
     )
 
 
+def _parse_dashboard(raw: dict[str, Any]) -> DashboardConfig:
+    mock_env = os.environ.get("MOCK_DATA")
+    return DashboardConfig(
+        sqlite_path=str(raw.get("sqlite_path") or "data/ppe.sqlite"),
+        live_dir=str(raw.get("live_dir") or "data/live"),
+        poll_interval_ms=_as_int(raw.get("poll_interval_ms"), 500),
+        snapshot_poll_interval_ms=_as_int(
+            raw.get("snapshot_poll_interval_ms", os.environ.get("SNAPSHOT_POLL_MS")),
+            120,
+        ),
+        mock_data=_as_bool(mock_env if mock_env not in (None, "") else raw.get("mock_data"), False),
+        host=str(raw.get("host") or os.environ.get("DASHBOARD_HOST") or "127.0.0.1"),
+        port=_as_int(raw.get("port", os.environ.get("DASHBOARD_PORT")), 8000),
+    )
+
+
 def load_settings(
     project_root: Path | None = None,
     app_yaml: Path | None = None,
@@ -301,6 +333,7 @@ def load_settings(
     violations_raw = app_raw.get("violations") or {}
     evidence_raw = app_raw.get("evidence") or {}
     logging_raw = app_raw.get("logging") or {}
+    dashboard_raw = app_raw.get("dashboard") or {}
 
     zones = {
         str(name): ZoneConfig(name=str(name), required_ppe=tuple(_as_str_list((spec or {}).get("required_ppe"))))
@@ -372,8 +405,17 @@ def load_settings(
             retention_days=_as_int(evidence_raw.get("retention_days"), 30),
             jpeg_quality=_as_int(evidence_raw.get("jpeg_quality"), 90),
             events_jsonl=str(evidence_raw.get("events_jsonl") or "evidence/events.jsonl"),
+            cooldown_seconds=_as_float(
+                evidence_raw.get("cooldown_seconds", os.environ.get("EVIDENCE_COOLDOWN_SECONDS")),
+                30.0,
+            ),
+            repeat_active_violations=_as_bool(
+                evidence_raw.get("repeat_active_violations", os.environ.get("REPEAT_ACTIVE_VIOLATIONS")),
+                False,
+            ),
         ),
         logging=LoggingConfig(level=str(logging_raw.get("level") or os.environ.get("LOG_LEVEL") or "INFO")),
+        dashboard=_parse_dashboard(dashboard_raw),
         cameras=cameras,
         project_root=root,
     )

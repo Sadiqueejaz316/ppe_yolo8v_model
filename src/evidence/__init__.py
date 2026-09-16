@@ -1,3 +1,3 @@
-from src.evidence.capture import EvidenceCapture
+from src.evidence.capture import EvidenceCapture, EvidenceSaveResult
 
-__all__ = ["EvidenceCapture"]
+__all__ = ["EvidenceCapture", "EvidenceSaveResult"]

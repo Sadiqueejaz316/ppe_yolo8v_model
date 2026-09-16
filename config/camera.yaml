@@ -8,5 +8,4 @@ cameras:
     connection_timeout: 10
     read_timeout: 10
     frame_skip: 0
-    confidence_threshold: ${CONFIDENCE_THRESHOLD:-0.35}
     zone: general
